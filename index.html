@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Figma Screenshot to Clean HTML Converter</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace" aria-label="Upload and preview workspace">
+        <div class="workspace-header">
+          <div>
+            <p class="eyebrow">Screenshot OCR</p>
+            <h1>Figma Screenshot to Clean HTML Converter</h1>
+          </div>
+          <div class="status-pill" id="fileStatus">No file selected</div>
+        </div>
+
+        <div class="upload-zone" id="uploadZone">
+          <input id="fileInput" type="file" accept="image/png,image/jpeg,application/pdf" />
+          <button class="primary-upload" id="uploadButton" type="button">Upload Figma Screenshot</button>
+          <p>Drop PNG, JPG, or PDF here</p>
+        </div>
+
+        <div class="preview-shell is-empty" id="previewShell">
+          <div class="canvas-toolbar">
+            <span id="canvasHint">Upload an image to preview it here</span>
+            <button class="ghost-button" id="clearSelectionButton" type="button" disabled>Clear Selection</button>
+          </div>
+          <div class="canvas-frame" id="canvasFrame">
+            <canvas id="previewCanvas"></canvas>
+            <div class="selection-box" id="selectionBox" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="controls" aria-label="Processing controls">
+        <div class="panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Whitelist</p>
+            <h2>Allowed Tags</h2>
+          </div>
+          <div class="check-grid">
+            <label class="check-row">
+              <input type="checkbox" name="tag" value="h2" checked />
+              <span>Header 2 <code>&lt;h2&gt;</code></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" name="tag" value="h3" checked />
+              <span>Header 3 <code>&lt;h3&gt;</code></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" name="tag" value="h4" />
+              <span>Header 4 <code>&lt;h4&gt;</code></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" name="tag" value="p" checked />
+              <span>Paragraph <code>&lt;p&gt;</code></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" name="tag" value="ul" checked />
+              <span>Unordered List <code>&lt;ul&gt;</code></span>
+            </label>
+            <label class="check-row">
+              <input type="checkbox" name="tag" value="li" checked />
+              <span>List Item <code>&lt;li&gt;</code></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="panel compact-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Structure</p>
+            <h2>Formatting Rule</h2>
+          </div>
+          <label class="check-row wide-row">
+            <input type="checkbox" id="lineBreaks" />
+            <span>Add <code>&lt;br/&gt;</code> after each closing tag</span>
+          </label>
+          <button class="convert-button" id="convertButton" type="button" disabled>
+            <span class="spinner" id="spinner" hidden></span>
+            <span id="convertText">Convert to Clean HTML</span>
+          </button>
+          <p class="helper-text" id="processNote">Upload a screenshot, optionally drag over the exact area to convert, then run conversion.</p>
+        </div>
+      </section>
+
+      <section class="output-section" aria-label="Cleaned HTML output">
+        <div class="output-header">
+          <div>
+            <p class="eyebrow">Output</p>
+            <h2>Cleaned HTML</h2>
+          </div>
+          <button class="copy-button" id="copyButton" type="button" disabled>Copy Code</button>
+        </div>
+        <pre class="code-editor" id="codeEditor"><code id="outputCode">&lt;!-- Converted HTML will appear here --&gt;</code></pre>
+      </section>
+    </main>
+
+    <canvas id="workCanvas" hidden></canvas>
+    <script src="./app.js?v=5"></script>
+  </body>
+</html>
