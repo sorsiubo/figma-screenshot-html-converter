@@ -659,6 +659,16 @@ const isShortNumericNoise = (line) => /^[0oO]{1,4}$/.test(line.trim()) || /^\d{1
 const isBulletedNumericNoise = (line) =>
   /^\s*(?:[-*+•∙●◦○·▪▫■□‣⁃–—.]|\d+[.)]|[oO])\s*(?:[0oO]{1,4}|\d{1,2})\s*$/i.test(line.trim());
 
+const stripLeadingListMarker = (line) =>
+  line.replace(/^\s*(?:[-*+•∙●◦○·▪▫■□‣⁃–—.]|\d+[.)]|[a-zA-Z][.)]|[oO])\s+/, "").trim();
+
+const isOcrGarbageLine = (line) => {
+  const text = stripLeadingListMarker(line);
+  if (!text) return true;
+  if (/[{}]/.test(text) && text.length <= 12) return true;
+  return /^[a-z]{1,4}[)}\]]$/i.test(text);
+};
+
 const repairDocumentCodeLine = (line) => {
   const documentCode = getUploadedDocumentCode();
   if (!documentCode) return line;
@@ -767,7 +777,7 @@ const isContinuationFragment = (lineItem, previousItem) => {
 };
 
 const scoreAsHeading = (line, index, lineItems, canvas) => {
-  if (isMarkerOnlyLine(line)) return "skip";
+  if (isMarkerOnlyLine(line) || isOcrGarbageLine(line)) return "skip";
   if (isDocumentCodeLine(line)) return "p";
   if (/^Sources?:?$/i.test(line.trim())) return "p";
   if (isBylineOrCredential(line)) return "p";
@@ -809,10 +819,11 @@ const getListText = (lineItem, canvas) => {
 
   if (listMatch) {
     const text = normalizeWhitespace(listMatch[1]);
+    if (isOcrGarbageLine(text)) return "";
     if (isShortNumericNoise(text)) return "";
     return /[A-Za-z0-9]/.test(text) ? text : "";
   }
-  if (hasVisualBullet(lineItem, canvas) && /[A-Za-z]/.test(line) && !isShortNumericNoise(line)) return line;
+  if (hasVisualBullet(lineItem, canvas) && /[A-Za-z]/.test(line) && !isShortNumericNoise(line) && !isOcrGarbageLine(line)) return line;
   return "";
 };
 

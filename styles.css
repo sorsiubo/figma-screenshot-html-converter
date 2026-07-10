@@ -47,10 +47,16 @@ button:disabled {
   padding: 32px 0;
 }
 
-.workspace,
-.controls,
+.top-layout,
 .output-section {
   margin-bottom: 18px;
+}
+
+.top-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr);
+  align-items: start;
+  gap: 18px;
 }
 
 .workspace,
@@ -91,8 +97,8 @@ h2 {
 }
 
 h1 {
-  font-size: clamp(1.7rem, 3vw, 2.55rem);
-  line-height: 1.08;
+  font-size: clamp(1.45rem, 2.25vw, 2.05rem);
+  line-height: 1.18;
 }
 
 h2 {
@@ -115,10 +121,13 @@ h2 {
 
 .upload-zone {
   position: relative;
-  display: grid;
-  place-items: center;
-  min-height: 180px;
-  margin-top: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 135px;
+  margin-top: 18px;
   border: 2px dashed #91a2b6;
   border-radius: 8px;
   background: var(--panel);
@@ -154,19 +163,19 @@ h2 {
 .primary-upload {
   z-index: 1;
   min-width: 240px;
-  min-height: 48px;
+  min-height: 44px;
   padding: 0 22px;
 }
 
 .upload-zone p {
   z-index: 1;
-  margin: 64px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 0.92rem;
 }
 
 .preview-shell {
-  margin-top: 18px;
+  margin-top: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #f8fafc;
@@ -199,8 +208,8 @@ h2 {
 .canvas-frame {
   position: relative;
   display: grid;
-  min-height: 320px;
-  max-height: 610px;
+  height: 430px;
+  min-height: 430px;
   place-items: center;
   overflow: auto;
 }
@@ -212,7 +221,7 @@ h2 {
 }
 
 .is-empty #previewCanvas {
-  min-height: 280px;
+  min-height: 240px;
 }
 
 .selection-box {
@@ -225,7 +234,6 @@ h2 {
 
 .controls {
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
   gap: 18px;
 }
 
@@ -237,7 +245,7 @@ h2 {
 
 .check-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 10px;
   margin-top: 16px;
 }
@@ -415,12 +423,14 @@ code {
     max-width: 100%;
   }
 
+  .top-layout,
   .controls,
   .check-grid {
     grid-template-columns: 1fr;
   }
 
   .canvas-frame {
-    min-height: 260px;
+    height: 340px;
+    min-height: 340px;
   }
 }

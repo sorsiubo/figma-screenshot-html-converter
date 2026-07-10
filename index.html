@@ -8,87 +8,89 @@
   </head>
   <body>
     <main class="app-shell">
-      <section class="workspace" aria-label="Upload and preview workspace">
-        <div class="workspace-header">
-          <div>
-            <p class="eyebrow">Screenshot OCR</p>
-            <h1>Figma Screenshot to Clean HTML Converter</h1>
+      <div class="top-layout">
+        <section class="workspace" aria-label="Upload and preview workspace">
+          <div class="workspace-header">
+            <div>
+              <p class="eyebrow">Screenshot OCR</p>
+              <h1>Figma Screenshot to Clean HTML Converter</h1>
+            </div>
+            <div class="status-pill" id="fileStatus">No file selected</div>
           </div>
-          <div class="status-pill" id="fileStatus">No file selected</div>
-        </div>
 
-        <div class="upload-zone" id="uploadZone">
-          <input id="fileInput" type="file" accept="image/png,image/jpeg,application/pdf" />
-          <button class="primary-upload" id="uploadButton" type="button">Upload Figma Screenshot</button>
-          <p>Drop PNG, JPG, or PDF here</p>
-        </div>
+          <div class="upload-zone" id="uploadZone">
+            <input id="fileInput" type="file" accept="image/png,image/jpeg,application/pdf" />
+            <button class="primary-upload" id="uploadButton" type="button">Upload File</button>
+            <p>Drop PNG, JPG, or PDF here</p>
+          </div>
 
-        <div class="preview-shell is-empty" id="previewShell">
-          <div class="canvas-toolbar">
-            <span id="canvasHint">Upload an image to preview it here</span>
-            <button class="ghost-button" id="clearSelectionButton" type="button" disabled>Clear Selection</button>
+          <div class="preview-shell is-empty" id="previewShell">
+            <div class="canvas-toolbar">
+              <span id="canvasHint">Upload an image to preview it here</span>
+              <button class="ghost-button" id="clearSelectionButton" type="button" disabled>Clear Selection</button>
+            </div>
+            <div class="canvas-frame" id="canvasFrame">
+              <canvas id="previewCanvas"></canvas>
+              <div class="selection-box" id="selectionBox" hidden></div>
+            </div>
           </div>
-          <div class="canvas-frame" id="canvasFrame">
-            <canvas id="previewCanvas"></canvas>
-            <div class="selection-box" id="selectionBox" hidden></div>
-          </div>
-        </div>
-      </section>
+        </section>
 
-      <section class="controls" aria-label="Processing controls">
-        <div class="panel">
-          <div class="panel-heading">
-            <p class="eyebrow">Whitelist</p>
-            <h2>Allowed Tags</h2>
+        <section class="controls" aria-label="Processing controls">
+          <div class="panel">
+            <div class="panel-heading">
+              <p class="eyebrow">Whitelist</p>
+              <h2>Allowed Tags</h2>
+            </div>
+            <div class="check-grid">
+              <label class="check-row">
+                <input type="checkbox" name="tag" value="h2" checked />
+                <span>Header 2 <code>&lt;h2&gt;</code></span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" name="tag" value="h3" checked />
+                <span>Header 3 <code>&lt;h3&gt;</code></span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" name="tag" value="h4" checked />
+                <span>Header 4 <code>&lt;h4&gt;</code></span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" name="tag" value="p" checked />
+                <span>Paragraph <code>&lt;p&gt;</code></span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" name="tag" value="ul" checked />
+                <span>Unordered List <code>&lt;ul&gt;</code></span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" name="tag" value="li" checked />
+                <span>List Item <code>&lt;li&gt;</code></span>
+              </label>
+              <label class="check-row">
+                <input type="checkbox" name="tag" value="a" checked />
+                <span>Anchor <code>&lt;a&gt;</code></span>
+              </label>
+            </div>
           </div>
-          <div class="check-grid">
-            <label class="check-row">
-              <input type="checkbox" name="tag" value="h2" checked />
-              <span>Header 2 <code>&lt;h2&gt;</code></span>
-            </label>
-            <label class="check-row">
-              <input type="checkbox" name="tag" value="h3" checked />
-              <span>Header 3 <code>&lt;h3&gt;</code></span>
-            </label>
-            <label class="check-row">
-              <input type="checkbox" name="tag" value="h4" checked />
-              <span>Header 4 <code>&lt;h4&gt;</code></span>
-            </label>
-            <label class="check-row">
-              <input type="checkbox" name="tag" value="p" checked />
-              <span>Paragraph <code>&lt;p&gt;</code></span>
-            </label>
-            <label class="check-row">
-              <input type="checkbox" name="tag" value="ul" checked />
-              <span>Unordered List <code>&lt;ul&gt;</code></span>
-            </label>
-            <label class="check-row">
-              <input type="checkbox" name="tag" value="li" checked />
-              <span>List Item <code>&lt;li&gt;</code></span>
-            </label>
-            <label class="check-row">
-              <input type="checkbox" name="tag" value="a" checked />
-              <span>Anchor <code>&lt;a&gt;</code></span>
-            </label>
-          </div>
-        </div>
 
-        <div class="panel compact-panel">
-          <div class="panel-heading">
-            <p class="eyebrow">Structure</p>
-            <h2>Formatting Rule</h2>
+          <div class="panel compact-panel">
+            <div class="panel-heading">
+              <p class="eyebrow">Structure</p>
+              <h2>Formatting Rule</h2>
+            </div>
+            <label class="check-row wide-row">
+              <input type="checkbox" id="lineBreaks" />
+              <span>Add <code>&lt;br/&gt;</code> after each closing tag</span>
+            </label>
+            <button class="convert-button" id="convertButton" type="button" disabled>
+              <span class="spinner" id="spinner" hidden></span>
+              <span id="convertText">Convert to Clean HTML</span>
+            </button>
+            <p class="helper-text" id="processNote">Upload a screenshot, optionally drag over the exact area to convert, then run conversion.</p>
           </div>
-          <label class="check-row wide-row">
-            <input type="checkbox" id="lineBreaks" />
-            <span>Add <code>&lt;br/&gt;</code> after each closing tag</span>
-          </label>
-          <button class="convert-button" id="convertButton" type="button" disabled>
-            <span class="spinner" id="spinner" hidden></span>
-            <span id="convertText">Convert to Clean HTML</span>
-          </button>
-          <p class="helper-text" id="processNote">Upload a screenshot, optionally drag over the exact area to convert, then run conversion.</p>
-        </div>
-      </section>
+        </section>
+      </div>
 
       <section class="output-section" aria-label="Cleaned HTML output">
         <div class="output-header">
@@ -103,6 +105,6 @@
     </main>
 
     <canvas id="workCanvas" hidden></canvas>
-    <script src="./app.js?v=25"></script>
+    <script src="./app.js?v=29"></script>
   </body>
 </html>
