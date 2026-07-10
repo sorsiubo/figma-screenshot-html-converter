@@ -6,10 +6,10 @@
   --paper: #fbfcfe;
   --surface: #ffffff;
   --panel: #f2f6fb;
-  --accent: #16735f;
-  --accent-dark: #0e5948;
-  --accent-soft: #e3f4ef;
-  --focus: #2d77c5;
+  --accent: #4c12a1;
+  --accent-dark: #3a0d7c;
+  --accent-soft: #efe7fb;
+  --focus: #4c12a1;
   --code-bg: #141a22;
   --code-text: #e8eef7;
   font-family:
@@ -148,7 +148,7 @@ h2 {
   color: #fff;
   background: var(--accent);
   font-weight: 800;
-  box-shadow: 0 12px 22px rgba(22, 115, 95, 0.22);
+  box-shadow: 0 12px 22px rgba(76, 18, 161, 0.22);
 }
 
 .primary-upload {

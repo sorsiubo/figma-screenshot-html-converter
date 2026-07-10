@@ -6,7 +6,7 @@ const previewShell = document.querySelector("#previewShell");
 const previewCanvas = document.querySelector("#previewCanvas");
 const canvasFrame = document.querySelector("#canvasFrame");
 const workCanvas = document.querySelector("#workCanvas");
-const selectionBox = document.querySelector("#selectionBox");
+let selectionBox = document.querySelector("#selectionBox");
 const clearSelectionButton = document.querySelector("#clearSelectionButton");
 const convertButton = document.querySelector("#convertButton");
 const convertText = document.querySelector("#convertText");
@@ -39,6 +39,103 @@ const escapeHtml = (value) =>
     };
     return entities[char];
   });
+
+const encodeSpecialCharacters = (value) => {
+  const entities = {
+    "\u00a0": "&nbsp;",
+    "\u00a9": "&copy;",
+    "\u00ae": "&reg;",
+    "\u2122": "&trade;",
+    "\u00b0": "&deg;",
+    "\u00d7": "&times;",
+    "\u00f7": "&divide;",
+    "\u20ac": "&euro;",
+    "\u00a3": "&pound;",
+    "\u00a5": "&yen;",
+    "\u2018": "&lsquo;",
+    "\u2019": "&rsquo;",
+    "\u201c": "&ldquo;",
+    "\u201d": "&rdquo;",
+    "\u2013": "&ndash;",
+    "\u2014": "&mdash;",
+    "\u2026": "&hellip;",
+  };
+
+  return value.replace(/[\u00a0\u00a9\u00ae\u2122\u00b0\u00d7\u00f7\u20ac\u00a3\u00a5\u2018\u2019\u201c\u201d\u2013\u2014\u2026]/g, (char) => entities[char]);
+};
+
+const cleanHtmlText = (value) => encodeSpecialCharacters(escapeHtml(value));
+
+const cleanHtmlTextWithSuperscripts = (value) =>
+  cleanHtmlText(value)
+    .replace(/([?.!])(?:&rsquo;|&#39;|&quot;)\s*$/g, "$1<sup>1</sup>")
+    .replace(/([?.!])(?:\s*)(?:1|I|l)\s*$/g, "$1<sup>1</sup>");
+
+const getHref = (value) => {
+  return "#";
+};
+
+const linkedTextPhrases = [
+  "AnnualCreditReport.com",
+  "estate planning",
+  "Privacy Policy",
+  "Do not sell my personal information",
+  "Limit the use of my sensitive personal information",
+];
+
+const appendLinkedPhrases = (value, allowedTags) => {
+  if (!allowedTags.includes("a")) return cleanHtmlTextWithSuperscripts(value);
+  const sourceMatch = value.match(/^(\s*(?:["'“”‘’]?\s*)?\d?\s*)(Pew Research Center,?\s*["'“”]?Family Caregiving in an Aging America,?["'“”]?\s*February 26, 2026\.?)/i);
+  if (sourceMatch) {
+    const prefix = sourceMatch[1];
+    const citation = sourceMatch[2].replace(/^[,\s]+/, "");
+    const suffix = value.slice(sourceMatch[0].length);
+    return `${cleanHtmlTextWithSuperscripts(prefix)}<a href="#">${cleanHtmlText(citation)}</a>${cleanHtmlTextWithSuperscripts(suffix)}`;
+  }
+
+  const phrasePattern = new RegExp(
+    `\\b(${linkedTextPhrases
+      .map((phrase) => phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|")})\\b`,
+    "gi",
+  );
+  let output = "";
+  let lastIndex = 0;
+
+  value.replace(phrasePattern, (match, phrase, offset) => {
+    output += cleanHtmlTextWithSuperscripts(value.slice(lastIndex, offset));
+    output += `<a href="#">${cleanHtmlText(match)}</a>`;
+    lastIndex = offset + match.length;
+    return match;
+  });
+
+  output += cleanHtmlTextWithSuperscripts(value.slice(lastIndex));
+  return output;
+};
+
+const cleanInlineHtml = (value, allowedTags) => {
+  const linkPattern = /\b((?:https?:\/\/)?(?:www\.)?(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:\/[^\s<]*)?)(?=[\s).,;:!?]|$)/g;
+  let output = "";
+  let lastIndex = 0;
+
+  value.replace(linkPattern, (match, url, offset) => {
+    output += appendLinkedPhrases(value.slice(lastIndex, offset), allowedTags);
+    const trailing = match.match(/[).,;:!?]+$/)?.[0] || "";
+    const linkText = trailing ? match.slice(0, -trailing.length) : match;
+    if (allowedTags.includes("a") && linkText.includes(".")) {
+      const href = cleanHtmlText(getHref(linkText));
+      output += `<a href="${href}">${cleanHtmlText(linkText)}</a>`;
+    } else {
+      output += cleanHtmlText(linkText);
+    }
+    output += cleanHtmlTextWithSuperscripts(trailing);
+    lastIndex = offset + match.length;
+    return match;
+  });
+
+  output += appendLinkedPhrases(value.slice(lastIndex), allowedTags);
+  return output;
+};
 
 const normalizeWhitespace = (value) => value.replace(/\s+/g, " ").trim();
 
@@ -81,36 +178,228 @@ const tagClasses = {
   h4: ' class="subheading-small"',
 };
 
-const headingStyles = `<style>
-.subheading-large {
-  margin: 0 0 14px;
-  font-size: 2rem;
-  font-weight: 800;
-  line-height: 1.15;
-}
-
-.subheading-medium {
-  margin: 0 0 10px;
-  color: #243447;
-  font-size: 1.35rem;
-  font-weight: 750;
-  line-height: 1.22;
-}
-
-.subheading-small {
-  margin: 0 0 8px;
-  color: #3b4b5f;
-  font-size: 1.05rem;
-  font-weight: 700;
-  line-height: 1.28;
-}
-
-.font-indigo {
-  color: #3730a3;
-}
-</style>`;
-
 const wrapElement = (tag, content) => `<${tag}${tagClasses[tag] || ""}>${content}</${tag}>`;
+
+const getOcrBbox = (line) => {
+  const bbox = line?.bbox;
+  if (!bbox) return null;
+  const x0 = bbox.x0 ?? bbox.left ?? bbox.x ?? 0;
+  const y0 = bbox.y0 ?? bbox.top ?? bbox.y ?? 0;
+  const x1 = bbox.x1 ?? (bbox.left != null && bbox.width != null ? bbox.left + bbox.width : null);
+  const y1 = bbox.y1 ?? (bbox.top != null && bbox.height != null ? bbox.top + bbox.height : null);
+  if (x1 == null || y1 == null) return null;
+  return { x0, y0, x1, y1 };
+};
+
+const rgbToHue = (red, green, blue) => {
+  const r = red / 255;
+  const g = green / 255;
+  const b = blue / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+
+  if (!delta) return { hue: 0, saturation: 0, value: max };
+
+  let hue = 0;
+  if (max === r) hue = ((g - b) / delta) % 6;
+  if (max === g) hue = (b - r) / delta + 2;
+  if (max === b) hue = (r - g) / delta + 4;
+  hue = Math.round(hue * 60);
+  if (hue < 0) hue += 360;
+
+  return { hue, saturation: max ? delta / max : 0, value: max };
+};
+
+const sampleRegion = (canvas, region, predicate) => {
+  if (!canvas || !region) return 0;
+  const x = Math.max(0, Math.floor(region.x));
+  const y = Math.max(0, Math.floor(region.y));
+  const width = Math.max(1, Math.min(canvas.width - x, Math.ceil(region.width)));
+  const height = Math.max(1, Math.min(canvas.height - y, Math.ceil(region.height)));
+  if (width <= 0 || height <= 0) return 0;
+
+  const data = canvas.getContext("2d").getImageData(x, y, width, height).data;
+  let matches = 0;
+  const stride = Math.max(1, Math.floor((width * height) / 900));
+
+  for (let pixel = 0; pixel < width * height; pixel += stride) {
+    const offset = pixel * 4;
+    if (predicate(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])) matches += 1;
+  }
+
+  return matches / Math.ceil((width * height) / stride);
+};
+
+const hasSmallMarker = (canvas, region) => {
+  if (!canvas || !region) return false;
+  const x = Math.max(0, Math.floor(region.x));
+  const y = Math.max(0, Math.floor(region.y));
+  const width = Math.max(1, Math.min(canvas.width - x, Math.ceil(region.width)));
+  const height = Math.max(1, Math.min(canvas.height - y, Math.ceil(region.height)));
+  if (width <= 0 || height <= 0) return false;
+
+  const data = canvas.getContext("2d").getImageData(x, y, width, height).data;
+  const marked = new Uint8Array(width * height);
+  const visited = new Uint8Array(width * height);
+
+  for (let index = 0; index < width * height; index += 1) {
+    const offset = index * 4;
+    const red = data[offset];
+    const green = data[offset + 1];
+    const blue = data[offset + 2];
+    const dark = red < 145 && green < 145 && blue < 145;
+    const colored = Math.max(red, green, blue) - Math.min(red, green, blue) > 45 && Math.max(red, green, blue) < 215;
+    marked[index] = dark || colored ? 1 : 0;
+  }
+
+  const stack = [];
+  for (let start = 0; start < marked.length; start += 1) {
+    if (!marked[start] || visited[start]) continue;
+
+    let count = 0;
+    let minX = width;
+    let minY = height;
+    let maxX = 0;
+    let maxY = 0;
+    stack.push(start);
+    visited[start] = 1;
+
+    while (stack.length) {
+      const current = stack.pop();
+      const cx = current % width;
+      const cy = Math.floor(current / width);
+      count += 1;
+      minX = Math.min(minX, cx);
+      minY = Math.min(minY, cy);
+      maxX = Math.max(maxX, cx);
+      maxY = Math.max(maxY, cy);
+
+      const neighbors = [current - 1, current + 1, current - width, current + width];
+      neighbors.forEach((next) => {
+        if (next < 0 || next >= marked.length || visited[next] || !marked[next]) return;
+        const nx = next % width;
+        if (Math.abs(nx - cx) > 1) return;
+        visited[next] = 1;
+        stack.push(next);
+      });
+    }
+
+    const componentWidth = maxX - minX + 1;
+    const componentHeight = maxY - minY + 1;
+    const area = componentWidth * componentHeight;
+    const density = count / area;
+    const aspect = componentWidth / componentHeight;
+    const compact = componentWidth >= 3 && componentHeight >= 3 && componentWidth <= 18 && componentHeight <= 18;
+    const markerLike = compact && aspect >= 0.45 && aspect <= 2.2 && density >= 0.18 && density <= 0.95;
+    if (markerLike) return true;
+  }
+
+  return false;
+};
+
+const isPurpleLine = (line, canvas) => {
+  const bbox = getOcrBbox(line);
+  if (!bbox) return false;
+  const padding = 4;
+  const ratio = sampleRegion(
+    canvas,
+    {
+      x: bbox.x0 - padding,
+      y: bbox.y0 - padding,
+      width: bbox.x1 - bbox.x0 + padding * 2,
+      height: bbox.y1 - bbox.y0 + padding * 2,
+    },
+    (red, green, blue) => {
+      const { hue, saturation, value } = rgbToHue(red, green, blue);
+      return hue >= 225 && hue <= 285 && saturation >= 0.28 && value >= 0.22 && blue > green * 1.25;
+    },
+  );
+
+  return ratio >= 0.012;
+};
+
+const isPurpleNeighborhood = (line, canvas) => {
+  const bbox = getOcrBbox(line);
+  if (!bbox) return false;
+  const height = Math.max(8, bbox.y1 - bbox.y0);
+  const ratio = sampleRegion(
+    canvas,
+    {
+      x: bbox.x0 - 8,
+      y: bbox.y0 - height * 0.45,
+      width: bbox.x1 - bbox.x0 + 16,
+      height: height * 1.9,
+    },
+    (red, green, blue) => {
+      const { hue, saturation, value } = rgbToHue(red, green, blue);
+      const purpleText = hue >= 235 && hue <= 285 && saturation >= 0.22 && value >= 0.18 && blue > red * 0.75;
+      const indigoText = blue > green * 1.15 && red > green * 1.05 && saturation >= 0.18 && value >= 0.15;
+      return purpleText || indigoText;
+    },
+  );
+
+  return ratio >= 0.006;
+};
+
+const hasVisualBullet = (line, canvas) => {
+  const bbox = getOcrBbox(line);
+  if (!bbox) return false;
+  const height = Math.max(8, bbox.y1 - bbox.y0);
+  const markerSize = Math.min(18, Math.max(8, height * 0.9));
+  const markerY = bbox.y0 + height * 0.5 - markerSize * 0.5;
+  const outsideMarker = hasSmallMarker(canvas, {
+    x: bbox.x0 - markerSize * 2.4,
+    y: markerY,
+    width: markerSize * 1.8,
+    height: markerSize,
+  });
+
+  if (outsideMarker) return true;
+
+  const leadingMarker = hasSmallMarker(canvas, {
+    x: bbox.x0,
+    y: markerY,
+    width: markerSize * 1.3,
+    height: markerSize,
+  });
+
+  return leadingMarker && /^[•∙●◦○·▪▫■□‣⁃–—]/.test(line.text);
+};
+
+const isBoldLine = (line, canvas) => {
+  const bbox = getOcrBbox(line);
+  if (!bbox) return false;
+  const ratio = sampleRegion(
+    canvas,
+    {
+      x: bbox.x0,
+      y: bbox.y0,
+      width: bbox.x1 - bbox.x0,
+      height: bbox.y1 - bbox.y0,
+    },
+    (red, green, blue) => red < 165 && green < 165 && blue < 165,
+  );
+
+  return ratio >= 0.1;
+};
+
+const getLineItems = (ocrData) => {
+  const ocrLines = Array.isArray(ocrData?.lines) ? ocrData.lines : [];
+  if (ocrLines.length) {
+    return ocrLines
+      .map((line) => ({
+        text: normalizeWhitespace((line.text || "").replace(/[|_]{2,}/g, " ")),
+        bbox: line.bbox,
+      }))
+      .filter((line) => line.text);
+  }
+
+  return (ocrData?.text || "")
+    .split(/\n+/)
+    .map((line) => ({ text: normalizeWhitespace(line.replace(/[|_]{2,}/g, " ")) }))
+    .filter((line) => line.text);
+};
 
 const loadScript = (src) =>
   new Promise((resolve, reject) => {
@@ -165,10 +454,23 @@ const drawPreview = () => {
   renderSelection();
 };
 
+const hardResetSelectionBox = () => {
+  const freshBox = selectionBox.cloneNode(false);
+  freshBox.hidden = true;
+  freshBox.removeAttribute("style");
+  freshBox.style.display = "none";
+  freshBox.style.left = "0";
+  freshBox.style.top = "0";
+  freshBox.style.width = "0";
+  freshBox.style.height = "0";
+  selectionBox.replaceWith(freshBox);
+  selectionBox = freshBox;
+};
+
 const renderSelection = () => {
   if (!state.selection) {
-    selectionBox.hidden = true;
-    clearSelectionButton.disabled = true;
+    hardResetSelectionBox();
+    clearSelectionButton.disabled = !state.imageBitmap;
     return;
   }
 
@@ -180,11 +482,45 @@ const renderSelection = () => {
   const height = state.selection.height * state.displayScale;
 
   selectionBox.hidden = false;
+  selectionBox.style.display = "block";
   selectionBox.style.left = `${left}px`;
   selectionBox.style.top = `${top}px`;
   selectionBox.style.width = `${width}px`;
   selectionBox.style.height = `${height}px`;
   clearSelectionButton.disabled = false;
+};
+
+const clearSelection = () => {
+  state.selection = null;
+  state.dragStart = null;
+  document.documentElement.dataset.selectionClearedAt = String(Date.now());
+  hardResetSelectionBox();
+  if (state.imageBitmap) {
+    clearSelectionButton.disabled = false;
+    canvasHint.textContent = "Selection cleared. Convert the full screenshot, or drag a new region.";
+  }
+};
+
+const clearPreview = () => {
+  state.file = null;
+  state.imageBitmap = null;
+  state.selection = null;
+  state.dragStart = null;
+  state.displayScale = 1;
+  document.documentElement.dataset.previewClearedAt = String(Date.now());
+  hardResetSelectionBox();
+
+  const ctx = previewCanvas.getContext("2d");
+  ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+  previewCanvas.width = 0;
+  previewCanvas.height = 0;
+  fileInput.value = "";
+  fileStatus.textContent = "No file selected";
+  previewShell.classList.add("is-empty");
+  convertButton.disabled = true;
+  clearSelectionButton.disabled = true;
+  canvasHint.textContent = "Upload an image to preview it here";
+  setNote("Upload a screenshot, optionally drag over the exact area to convert, then run conversion.");
 };
 
 const canvasPointFromEvent = (event) => {
@@ -258,6 +594,7 @@ const handleFile = async (file) => {
     state.imageBitmap = await imageBitmapFromFile(file);
     previewShell.classList.remove("is-empty");
     convertButton.disabled = false;
+    clearSelectionButton.disabled = false;
     canvasHint.textContent = "Drag over the screenshot to convert only that bounding box.";
     setNote("Ready. Convert the full screenshot, or drag a region first.");
     drawPreview();
@@ -271,72 +608,300 @@ const handleFile = async (file) => {
   }
 };
 
-const scoreAsHeading = (line, index, lines) => {
+const getTextShape = (line) => {
   const words = line.split(" ").length;
   const letters = line.replace(/[^A-Za-z]/g, "");
   const upperRatio = letters ? line.replace(/[^A-Z]/g, "").length / letters.length : 0;
-  if (index === 0 && words <= 8) return "h2";
-  if (words <= 7 && (upperRatio > 0.46 || line.length <= 54) && lines[index + 1]) return "h3";
-  if (words <= 7 && line.length <= 64) return "h4";
+  const titleWords = line
+    .split(/\s+/)
+    .filter((word) => /^[A-Z][A-Za-z0-9'’-]*$/.test(word)).length;
+  const titleRatio = words ? titleWords / words : 0;
+  const endsLikeSentence = /[.!?]$/.test(line);
+
+  return { words, upperRatio, titleRatio, endsLikeSentence };
+};
+
+const shouldCloseParagraph = (lineItem, nextItem) => {
+  const line = lineItem.text;
+  if (!nextItem) return true;
+  if (isBylineOrCredential(line)) return true;
+  if (looksLikeNewSection(lineItem)) return true;
+
+  const currentBox = getOcrBbox(lineItem);
+  const nextBox = getOcrBbox(nextItem);
+  if (currentBox && nextBox) {
+    const currentHeight = Math.max(1, currentBox.y1 - currentBox.y0);
+    const gap = nextBox.y0 - currentBox.y1;
+    if (gap <= currentHeight * 0.9 && shouldMergeWrappedLine(lineItem, nextItem)) return false;
+    return true;
+  }
+
+  if (!/[.!?:;]$/.test(line)) return false;
+  return false;
+};
+
+const isBylineOrCredential = (line) => {
+  const credentialPattern = /\b(CLU|ChFC|CFP|CPA|CFA|MBA|PhD|JD|MD|Esq)\b|&reg;|®/i;
+  const jobTitlePattern = /\b(VP|CEO|CFO|COO|Head of|Director|Manager|President|Officer|Distribution|Sales|Marketing)\b/i;
+  const hasNameComma = /^[A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+,/.test(line);
+  return credentialPattern.test(line) || jobTitlePattern.test(line) || hasNameComma;
+};
+
+const getUploadedDocumentCode = () => {
+  const match = state.file?.name?.match(/\bWEB\.\d+(?:\.\d+)+\b/i);
+  return match ? match[0].toUpperCase() : "";
+};
+
+const isDocumentCodeLine = (line) => /^WEB\.\d+(?:\.\d+)*$/i.test(line.trim());
+
+const isShortNumericNoise = (line) => /^[0oO]{1,4}$/.test(line.trim()) || /^\d{1,2}$/.test(line.trim());
+
+const isBulletedNumericNoise = (line) =>
+  /^\s*(?:[-*+•∙●◦○·▪▫■□‣⁃–—.]|\d+[.)]|[oO])\s*(?:[0oO]{1,4}|\d{1,2})\s*$/i.test(line.trim());
+
+const repairDocumentCodeLine = (line) => {
+  const documentCode = getUploadedDocumentCode();
+  if (!documentCode) return line;
+  if (isDocumentCodeLine(line)) return line.toUpperCase();
+  if (isBulletedNumericNoise(line)) return documentCode;
+  if (isShortNumericNoise(line)) return documentCode;
+  return line;
+};
+
+const dedupeDocumentCodeLines = (lineItems) => {
+  const seenDocumentCodes = new Set();
+
+  return lineItems.filter((lineItem) => {
+    if (!isDocumentCodeLine(lineItem.text)) return true;
+    const code = lineItem.text.toUpperCase();
+    if (seenDocumentCodes.has(code)) return false;
+    seenDocumentCodes.add(code);
+    lineItem.text = code;
+    return true;
+  });
+};
+
+const looksLikeNewSection = (lineItem) => {
+  if (!lineItem) return false;
+  const line = lineItem.text;
+  if (/^Sources?:?$/i.test(line.trim())) return true;
+  if (isBylineOrCredential(line) || isMarkerOnlyLine(line)) return true;
+  const shape = getTextShape(line);
+  const compact = shape.words <= 13 && line.length <= 115;
+  const titleLike = shape.titleRatio >= 0.45 || shape.upperRatio >= 0.55 || /[?]$/.test(line);
+  return compact && titleLike;
+};
+
+const isMarkerOnlyLine = (line) => /^\s*[-*+•∙●◦○·▪▫■□‣⁃–—.]\s*[.)]?\s*$/.test(line.trim());
+
+const previousLineContinues = (previousItem, lineItem) => {
+  if (!previousItem || !lineItem) return false;
+  if (isBylineOrCredential(previousItem.text) || isDocumentCodeLine(previousItem.text)) return false;
+  if (/[.!?:;]$/.test(previousItem.text)) return false;
+
+  const currentShape = getTextShape(lineItem.text);
+  if (currentShape.words <= 8 && lineItem.text.length <= 90) return true;
+
+  const previousBox = getOcrBbox(previousItem);
+  const currentBox = getOcrBbox(lineItem);
+  if (previousBox && currentBox) {
+    const previousHeight = Math.max(1, previousBox.y1 - previousBox.y0);
+    const gap = currentBox.y0 - previousBox.y1;
+    if (gap <= previousHeight * 0.9) return true;
+  }
+
+  return false;
+};
+
+const shouldMergeWrappedLine = (previousItem, lineItem) => {
+  if (!previousItem || !lineItem) return false;
+  const line = lineItem.text;
+  const previousLine = previousItem.text;
+  const shape = getTextShape(line);
+  if (isDocumentCodeLine(previousLine) || isMarkerOnlyLine(previousLine)) return false;
+  if (/^\s*[-*+•∙●◦○·▪▫■□‣⁃–—]\s+/.test(line)) return false;
+  if (/[.!?:;]$/.test(previousLine)) return false;
+  if (/^[a-z]/.test(line)) return true;
+  if (!/^[a-z]/.test(line) && (shape.words > 8 || line.length > 90)) return false;
+  if (previousLineContinues(previousItem, lineItem)) return true;
+  return /^[a-z]/.test(line) && shape.words <= 7;
+};
+
+const mergeWrappedLines = (lineItems) => {
+  const merged = [];
+
+  lineItems.forEach((lineItem) => {
+    const previous = merged[merged.length - 1];
+    if (shouldMergeWrappedLine(previous, lineItem)) {
+      const repairedText = lineItem.text.replace(/^ith\b/i, "with");
+      previous.text = normalizeWhitespace(`${previous.text} ${repairedText}`);
+      if (previous.bbox && lineItem.bbox) {
+        const previousBox = getOcrBbox(previous);
+        const currentBox = getOcrBbox(lineItem);
+        previous.bbox = {
+          x0: Math.min(previousBox.x0, currentBox.x0),
+          y0: Math.min(previousBox.y0, currentBox.y0),
+          x1: Math.max(previousBox.x1, currentBox.x1),
+          y1: Math.max(previousBox.y1, currentBox.y1),
+        };
+      }
+      return;
+    }
+
+    merged.push({ ...lineItem });
+  });
+
+  return merged;
+};
+
+const isContinuationFragment = (lineItem, previousItem) => {
+  if (!lineItem) return false;
+  const line = lineItem.text;
+  if (!previousItem) return false;
+  const shape = getTextShape(line);
+  if (shape.words > 5 || line.length > 44) return false;
+  if (!shape.endsLikeSentence) return false;
+  if (/^[A-Z]/.test(line)) return false;
+  if (isBylineOrCredential(line)) return false;
+  return true;
+};
+
+const scoreAsHeading = (line, index, lineItems, canvas) => {
+  if (isMarkerOnlyLine(line)) return "skip";
+  if (isDocumentCodeLine(line)) return "p";
+  if (/^Sources?:?$/i.test(line.trim())) return "p";
+  if (isBylineOrCredential(line)) return "p";
+  if (previousLineContinues(lineItems[index - 1], lineItems[index])) return "p";
+  if (isContinuationFragment(lineItems[index], lineItems[index - 1])) return "p";
+
+  const { words, upperRatio, titleRatio, endsLikeSentence } = getTextShape(line);
+  const nextLine = lineItems[index + 1]?.text || "";
+  const nextShape = nextLine ? getTextShape(nextLine) : null;
+  const shortLine = words <= 8 && line.length <= 72;
+  const sectionLine = words <= 13 && line.length <= 115;
+  const headingCase = upperRatio >= 0.55 || titleRatio >= 0.55;
+  const bodyLikeNext = nextShape && (nextShape.words >= 5 || nextShape.endsLikeSentence || nextLine.length > line.length + 12);
+  const followedByBody = nextShape && (nextShape.words > words + 2 || nextLine.length > line.length + 16);
+  const stronglyFollowedByBody = nextShape && (nextShape.words >= words + 3 || nextLine.length > line.length + 12);
+  const boldStandalone = isBoldLine(lineItems[index], canvas) && sectionLine;
+  const structuralSectionHeading = index > 0 && sectionLine && bodyLikeNext && stronglyFollowedByBody;
+  const purpleTitle = isPurpleLine(lineItems[index], canvas) && sectionLine && !/[.]$/.test(line);
+  const firstContentTitle = index === 0 && sectionLine && !endsLikeSentence && nextShape;
+
+  if (purpleTitle) return "h2";
+  if (sectionLine && !/[.]$/.test(line) && bodyLikeNext && isPurpleNeighborhood(lineItems[index], canvas)) return "h2";
+  if (firstContentTitle) return "h2";
+  if (index === 0 && words <= 10 && line.length <= 86 && headingCase && !endsLikeSentence) return "h2";
+  if ((shortLine && headingCase && followedByBody && !endsLikeSentence) || boldStandalone || structuralSectionHeading) return "h3";
+  if (words <= 7 && line.length <= 64 && headingCase && !endsLikeSentence) return "h4";
   return "p";
 };
 
-const textToHtml = (rawText, allowedTags, shouldAddBreaks) => {
-  const cleanedLines = rawText
-    .split(/\n+/)
-    .map((line) => normalizeWhitespace(line.replace(/[|_]{2,}/g, " ")))
-    .filter(Boolean);
+const getListText = (lineItem, canvas) => {
+  const line = lineItem.text;
+  const listMatch =
+    line.match(/^\s*[•∙●◦○·▪▫■□‣⁃–—]\s*(.+)$/) ||
+    line.match(/^\s*[·.]\s+(.+)$/) ||
+    line.match(/^\s*[-*+]\s+(.+)$/) ||
+    line.match(/^\s*\d+[.)]\s+(.+)$/) ||
+    line.match(/^\s*[a-zA-Z][.)]\s+(.+)$/) ||
+    line.match(/^\s*[oO]\s{1,2}(.+)$/);
 
-  if (!cleanedLines.length) {
+  if (listMatch) {
+    const text = normalizeWhitespace(listMatch[1]);
+    if (isShortNumericNoise(text)) return "";
+    return /[A-Za-z0-9]/.test(text) ? text : "";
+  }
+  if (hasVisualBullet(lineItem, canvas) && /[A-Za-z]/.test(line) && !isShortNumericNoise(line)) return line;
+  return "";
+};
+
+const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
+  const lineItems = mergeWrappedLines(
+    dedupeDocumentCodeLines(
+      getLineItems(ocrData).map((lineItem) => ({
+        ...lineItem,
+        text: repairDocumentCodeLine(lineItem.text),
+      })),
+    ),
+  );
+
+  if (!lineItems.length) {
     return "<!-- No readable text was detected in the selected area. -->";
   }
 
   const output = [];
   let pendingList = [];
+  let pendingParagraph = [];
 
   const flushList = () => {
     if (!pendingList.length) return;
     if (allowedTags.includes("ul")) {
       if (allowedTags.includes("li")) {
-        output.push(`<ul>${pendingList.map((item) => wrapElement("li", escapeHtml(item))).join("")}</ul>`);
+        const listItems = pendingList
+          .map((item) => {
+            const listItem = wrapElement("li", cleanInlineHtml(item, allowedTags));
+            return shouldAddBreaks ? `${listItem}<br/>` : listItem;
+          })
+          .join("");
+        output.push(`<ul>${listItems}</ul>`);
       } else {
-        output.push(wrapElement("ul", escapeHtml(pendingList.join(" "))));
+        output.push(wrapElement("ul", cleanInlineHtml(pendingList.join(" "), allowedTags)));
       }
     } else if (allowedTags.includes("p")) {
-      pendingList.forEach((item) => output.push(wrapElement("p", escapeHtml(item))));
+      pendingList.forEach((item) => output.push(wrapElement("p", cleanInlineHtml(item, allowedTags))));
     }
     pendingList = [];
   };
 
-  cleanedLines.forEach((line, index) => {
-    const listMatch = line.match(/^[-*•]\s+(.+)/) || line.match(/^\d+[.)]\s+(.+)/);
-    if (listMatch) {
-      pendingList.push(listMatch[1]);
+  const flushParagraph = () => {
+    if (!pendingParagraph.length) return;
+    if (allowedTags.includes("p")) {
+      output.push(wrapElement("p", cleanInlineHtml(pendingParagraph.join(" "), allowedTags)));
+    } else {
+      const fallbackTag = ["h4", "h3", "h2"].find((tag) => allowedTags.includes(tag));
+      if (fallbackTag) output.push(wrapElement(fallbackTag, cleanInlineHtml(pendingParagraph.join(" "), allowedTags)));
+    }
+    pendingParagraph = [];
+  };
+
+  lineItems.forEach((lineItem, index) => {
+    const line = lineItem.text;
+    const listText = getListText(lineItem, canvas);
+    if (listText) {
+      flushParagraph();
+      pendingList.push(listText);
       return;
     }
 
     flushList();
-    const preferredTag = scoreAsHeading(line, index, cleanedLines);
-    const fallback = ["p", "h4", "h3", "h2"].find((tag) => allowedTags.includes(tag));
+    const preferredTag = scoreAsHeading(line, index, lineItems, canvas);
+    if (preferredTag === "skip") {
+      flushParagraph();
+      return;
+    }
+    if (preferredTag === "p") {
+      pendingParagraph.push(line);
+      const nextItem = lineItems[index + 1];
+      if (shouldCloseParagraph(lineItem, nextItem) && !isContinuationFragment(nextItem, lineItem)) flushParagraph();
+      return;
+    }
+
+    flushParagraph();
+    const fallback = ["h4", "h3", "h2", "p"].find((tag) => allowedTags.includes(tag));
     const tag = allowedTags.includes(preferredTag) ? preferredTag : fallback;
     if (!tag) return;
-    output.push(wrapElement(tag, escapeHtml(line)));
+    output.push(wrapElement(tag, cleanInlineHtml(line, allowedTags)));
   });
 
+  flushParagraph();
   flushList();
 
   if (!output.length) {
     return "<!-- All detected text was filtered out by the tag whitelist. -->";
   }
 
-  const html = output.map((line) => (shouldAddBreaks ? `${line}<br/>` : line)).join("\n");
-  const usesStyledHeading = output.some((line) =>
-    ["subheading-large", "subheading-medium", "subheading-small"].some((className) =>
-      line.includes(className),
-    ),
-  );
-
-  return usesStyledHeading ? `${headingStyles}\n${html}` : html;
+  return output.map((line) => (shouldAddBreaks ? `${line}<br/>` : line)).join("\n");
 };
 
 const convertScreenshot = async () => {
@@ -361,7 +926,7 @@ const convertScreenshot = async () => {
         }
       },
     });
-    const html = textToHtml(result.data.text, allowedTags, lineBreaks.checked);
+    const html = textToHtml(result.data, allowedTags, lineBreaks.checked, cropCanvas);
     setOutput(html);
     copyButton.disabled = false;
     setNote("Conversion finished.");
@@ -416,10 +981,11 @@ previewCanvas.addEventListener("pointerup", (event) => {
   renderSelection();
 });
 
-clearSelectionButton.addEventListener("click", () => {
-  state.selection = null;
-  renderSelection();
-});
+clearSelectionButton.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  clearPreview();
+}, true);
 
 convertButton.addEventListener("click", convertScreenshot);
 
