@@ -82,31 +82,24 @@ const getHref = (value) => {
   return "#";
 };
 
-const linkedTextPhrases = [
+const visualLinkPhrases = [
   "AnnualCreditReport.com",
   "estate planning",
   "Investopedia",
   "LegalZoom",
   "post-divorce finances",
+  "visit our Resources for you section of the site",
   "Privacy Policy",
   "Do not sell my personal information",
   "Limit the use of my sensitive personal information",
 ];
 
-const appendLinkedPhrases = (value, allowedTags) => {
-  if (!allowedTags.includes("a")) return cleanHtmlTextWithSuperscripts(value);
-  const sourceMatch = value.match(/^(\s*(?:["'“”‘’]?\s*)?\d?\s*)(Pew Research Center,?\s*["'“”]?Family Caregiving in an Aging America,?["'“”]?\s*February 26, 2026\.?)/i);
-  if (sourceMatch) {
-    const prefix = sourceMatch[1];
-    const citation = sourceMatch[2].replace(/^[,\s]+/, "");
-    const suffix = value.slice(sourceMatch[0].length);
-    return `${cleanHtmlTextWithSuperscripts(prefix)}<a href="#">${cleanHtmlText(citation)}</a>${cleanHtmlTextWithSuperscripts(suffix)}`;
-  }
+const appendLinkedPhrases = (value, allowedTags, linkPhrases = []) => {
+  const uniquePhrases = [...new Set(linkPhrases)].filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!allowedTags.includes("a") || !uniquePhrases.length) return cleanHtmlTextWithSuperscripts(value);
 
   const phrasePattern = new RegExp(
-    `\\b(${linkedTextPhrases
-      .map((phrase) => phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-      .join("|")})\\b`,
+    `(${uniquePhrases.map((phrase) => phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`,
     "gi",
   );
   let output = "";
@@ -123,13 +116,13 @@ const appendLinkedPhrases = (value, allowedTags) => {
   return output;
 };
 
-const cleanInlineHtml = (value, allowedTags) => {
+const cleanInlineHtml = (value, allowedTags, linkPhrases = []) => {
   const linkPattern = /\b((?:https?:\/\/)?(?:www\.)?(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:\/[^\s<]*)?)(?=[\s).,;:!?]|$)/g;
   let output = "";
   let lastIndex = 0;
 
   value.replace(linkPattern, (match, url, offset) => {
-    output += appendLinkedPhrases(value.slice(lastIndex, offset), allowedTags);
+    output += appendLinkedPhrases(value.slice(lastIndex, offset), allowedTags, linkPhrases);
     const trailing = match.match(/[).,;:!?]+$/)?.[0] || "";
     const linkText = trailing ? match.slice(0, -trailing.length) : match;
     if (allowedTags.includes("a") && linkText.includes(".")) {
@@ -143,7 +136,7 @@ const cleanInlineHtml = (value, allowedTags) => {
     return match;
   });
 
-  output += appendLinkedPhrases(value.slice(lastIndex), allowedTags);
+  output += appendLinkedPhrases(value.slice(lastIndex), allowedTags, linkPhrases);
   return output;
 };
 
@@ -151,6 +144,8 @@ const normalizeWhitespace = (value) => value.replace(/\s+/g, " ").trim();
 
 const cleanOcrText = (value) =>
   value
+    .replace(/\bAnew\b/g, "A new")
+    .replace(/\bAdivorce\b/g, "A divorce")
     .replace(/\balist\b/gi, "a list")
     .replace(/\bcan difficult\b/gi, "can be difficult")
     .replace(/\bsoon to be\b/gi, "soon-to-be");
@@ -473,6 +468,45 @@ const isPurpleNeighborhood = (line, canvas) => {
   return ratio >= 0.006;
 };
 
+const hasPurplePhrase = (lineItem, phrase, canvas) => {
+  if (lineItem?.visualLinkPhrases?.includes(phrase)) return true;
+  const bbox = getOcrBbox(lineItem);
+  const line = lineItem?.text || "";
+  if (!bbox || !canvas || !line) return false;
+
+  const lineLower = line.toLowerCase();
+  const phraseLower = phrase.toLowerCase();
+  const phraseIndex = lineLower.indexOf(phraseLower);
+  if (phraseIndex < 0) return false;
+
+  const textLength = Math.max(1, line.length);
+  const boxWidth = Math.max(1, bbox.x1 - bbox.x0);
+  const boxHeight = Math.max(8, bbox.y1 - bbox.y0);
+  const startRatio = phraseIndex / textLength;
+  const endRatio = Math.min(1, (phraseIndex + phrase.length) / textLength);
+  const padding = 5;
+  const ratio = sampleRegion(
+    canvas,
+    {
+      x: bbox.x0 + boxWidth * startRatio - padding,
+      y: bbox.y0 - padding,
+      width: boxWidth * Math.max(0.04, endRatio - startRatio) + padding * 2,
+      height: boxHeight + padding * 2,
+    },
+    (red, green, blue) => {
+      const { hue, saturation, value } = rgbToHue(red, green, blue);
+      const purpleText = hue >= 235 && hue <= 285 && saturation >= 0.2 && value >= 0.15 && blue > green * 1.08;
+      const indigoText = blue > green * 1.12 && red > green * 1.02 && saturation >= 0.16 && value >= 0.13;
+      return purpleText || indigoText;
+    },
+  );
+
+  return ratio >= 0.004;
+};
+
+const getVisualLinkPhrases = (lineItem, canvas) =>
+  visualLinkPhrases.filter((phrase) => hasPurplePhrase(lineItem, phrase, canvas));
+
 const hasVisualBullet = (line, canvas) => {
   const bbox = getOcrBbox(line);
   if (!bbox) return false;
@@ -522,6 +556,7 @@ const getLineItems = (ocrData) => {
       .map((line) => ({
         text: normalizeWhitespace((line.text || "").replace(/[|_]{2,}/g, " ")),
         bbox: line.bbox,
+        visualLinkPhrases: line.visualLinkPhrases,
       }))
       .filter((line) => line.text);
   }
@@ -788,6 +823,10 @@ const forcedH2Headings = new Set([
   "how much does a divorce cost?",
   "6 money tips to help you financially survive a divorce",
   "financial steps once your divorce is final",
+  "making changes to your last will and testament",
+  "1. make a whole new will",
+  "2. make a codicil to your will",
+  "3. alter your existing will",
 ]);
 
 const isForcedH2Heading = (line) => forcedH2Headings.has(line.trim().toLowerCase());
@@ -1115,6 +1154,7 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
   let pendingList = [];
   let pendingParagraph = [];
   let pendingParagraphLead = "";
+  let pendingParagraphLinkPhrases = [];
 
   const flushList = () => {
     if (!pendingList.length) return;
@@ -1139,21 +1179,23 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
   const flushParagraph = () => {
     if (!pendingParagraph.length) return;
     const paragraphText = pendingParagraph.join(" ");
+    const linkPhrases = pendingParagraphLinkPhrases;
     if (allowedTags.includes("p")) {
       if (pendingParagraphLead) {
         output.push(wrapElement(
           "p",
-          `<strong>${cleanInlineHtml(pendingParagraphLead, allowedTags)}</strong> &mdash; ${cleanInlineHtml(paragraphText, allowedTags)}`,
+          `<strong>${cleanInlineHtml(pendingParagraphLead, allowedTags)}</strong> &mdash; ${cleanInlineHtml(paragraphText, allowedTags, linkPhrases)}`,
         ));
       } else {
-        output.push(wrapElement("p", cleanInlineHtml(paragraphText, allowedTags)));
+        output.push(wrapElement("p", cleanInlineHtml(paragraphText, allowedTags, linkPhrases)));
       }
     } else {
       const fallbackTag = ["h4", "h3", "h2"].find((tag) => allowedTags.includes(tag));
-      if (fallbackTag) output.push(wrapElement(fallbackTag, cleanInlineHtml(`${pendingParagraphLead} ${paragraphText}`, allowedTags)));
+      if (fallbackTag) output.push(wrapElement(fallbackTag, cleanInlineHtml(`${pendingParagraphLead} ${paragraphText}`, allowedTags, linkPhrases)));
     }
     pendingParagraph = [];
     pendingParagraphLead = "";
+    pendingParagraphLinkPhrases = [];
   };
 
   lineItems.forEach((lineItem, index) => {
@@ -1186,6 +1228,7 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
       flushList();
       pendingParagraphLead = numberedInlineTip.title;
       pendingParagraph.push(numberedInlineTip.body);
+      pendingParagraphLinkPhrases.push(...getVisualLinkPhrases(lineItem, canvas));
       if (!shouldContinueNumberedTipBody(lineItem, lineItems[index + 1])) flushParagraph();
       return;
     }
@@ -1218,6 +1261,7 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
     }
     if (preferredTag === "p") {
       pendingParagraph.push(line);
+      pendingParagraphLinkPhrases.push(...getVisualLinkPhrases(lineItem, canvas));
       const nextItem = lineItems[index + 1];
       if (shouldCloseParagraph(lineItem, nextItem) && !isContinuationFragment(nextItem, lineItem)) flushParagraph();
       return;
