@@ -330,10 +330,48 @@ code {
   background: var(--surface);
 }
 
+.output-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tab-toggle {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.tab-button {
+  min-width: 82px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+  font-weight: 800;
+}
+
+.tab-button.is-active {
+  color: #fff;
+  background: var(--accent);
+  box-shadow: 0 8px 16px rgba(76, 18, 161, 0.18);
+}
+
 .copy-button.is-copied {
   border-color: var(--accent);
   color: var(--accent-dark);
   background: var(--accent-soft);
+}
+
+.output-panel {
+  display: none;
+}
+
+.output-panel.is-active {
+  display: block;
 }
 
 .code-editor {
@@ -352,6 +390,15 @@ code {
 
 .code-editor code {
   color: inherit;
+}
+
+.preview-frame {
+  display: block;
+  width: 100%;
+  min-height: 420px;
+  height: 540px;
+  border: 0;
+  background: #fff;
 }
 
 .subheading-large {
@@ -417,6 +464,20 @@ code {
   .output-header {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .output-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .tab-toggle {
+    width: 100%;
+  }
+
+  .tab-button,
+  .copy-button {
+    flex: 1;
   }
 
   .status-pill {

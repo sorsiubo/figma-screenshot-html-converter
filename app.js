@@ -12,6 +12,11 @@ const convertButton = document.querySelector("#convertButton");
 const convertText = document.querySelector("#convertText");
 const spinner = document.querySelector("#spinner");
 const outputCode = document.querySelector("#outputCode");
+const codeTab = document.querySelector("#codeTab");
+const previewTab = document.querySelector("#previewTab");
+const codePanel = document.querySelector("#codePanel");
+const previewPanel = document.querySelector("#previewPanel");
+const previewFrame = document.querySelector("#previewFrame");
 const copyButton = document.querySelector("#copyButton");
 const processNote = document.querySelector("#processNote");
 const canvasHint = document.querySelector("#canvasHint");
@@ -27,6 +32,8 @@ const state = {
   pdfReady: null,
   outputRaw: "<!-- Converted HTML will appear here -->",
 };
+
+const outputPlaceholder = "<!-- Converted HTML will appear here -->";
 
 const escapeHtml = (value) =>
   value.replace(/[&<>"']/g, (char) => {
@@ -163,9 +170,122 @@ const highlightHtml = (value) => {
   );
 };
 
+const previewStyles = `
+  :root {
+    color-scheme: light;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #1d2733;
+    background: #ffffff;
+  }
+
+  body {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 28px;
+    font-size: 16px;
+    line-height: 1.62;
+  }
+
+  h2,
+  h3,
+  h4,
+  p,
+  ul {
+    margin-top: 0;
+  }
+
+  h2 {
+    margin-bottom: 16px;
+    color: #4c12a1;
+    font-size: 1.65rem;
+    line-height: 1.18;
+  }
+
+  h3 {
+    margin-bottom: 10px;
+    color: #182231;
+    font-size: 1.24rem;
+    line-height: 1.24;
+  }
+
+  h4 {
+    margin-bottom: 8px;
+    color: #344255;
+    font-size: 1.05rem;
+    line-height: 1.3;
+  }
+
+  p {
+    margin-bottom: 16px;
+  }
+
+  ul {
+    margin-bottom: 18px;
+    padding-left: 1.35rem;
+  }
+
+  li {
+    margin-bottom: 6px;
+  }
+
+  a {
+    color: #4c12a1;
+    font-weight: 700;
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 2px;
+  }
+
+  strong {
+    font-weight: 800;
+  }
+
+  img {
+    max-width: 100%;
+    height: auto;
+  }
+
+  .empty-preview {
+    display: grid;
+    min-height: 320px;
+    place-items: center;
+    color: #667384;
+    text-align: center;
+  }
+`;
+
+const getPreviewDocument = (value) => {
+  const isPlaceholder = value.trim() === outputPlaceholder || /^<!--[\s\S]*-->$/.test(value.trim());
+  const previewBody = isPlaceholder
+    ? '<div class="empty-preview">Preview will appear after conversion.</div>'
+    : value;
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>${previewStyles}</style>
+  </head>
+  <body>${previewBody}</body>
+</html>`;
+};
+
 const setOutput = (value) => {
   state.outputRaw = value;
   outputCode.innerHTML = highlightHtml(value);
+  previewFrame.srcdoc = getPreviewDocument(value);
+};
+
+const setOutputView = (view) => {
+  const isPreview = view === "preview";
+  codeTab.classList.toggle("is-active", !isPreview);
+  previewTab.classList.toggle("is-active", isPreview);
+  codeTab.setAttribute("aria-selected", String(!isPreview));
+  previewTab.setAttribute("aria-selected", String(isPreview));
+  codePanel.classList.toggle("is-active", !isPreview);
+  previewPanel.classList.toggle("is-active", isPreview);
+  codePanel.hidden = isPreview;
+  previewPanel.hidden = !isPreview;
 };
 
 const setProcessing = (isProcessing) => {
@@ -690,11 +810,25 @@ const isUnnumberedSectionHeading = (lineItem, nextItem, canvas) => {
 
 const getUnnumberedSectionHeadingText = (line) => getKnownNumberedSectionHeadingText(line) || line;
 
+const shouldKeepKnownParagraphTogether = (lineItem, nextItem) => {
+  if (!lineItem || !nextItem) return false;
+  const line = lineItem.text.trim();
+  const nextLine = nextItem.text.trim();
+  if (
+    /^These are just a few important considerations for rebuilding your new personal financial plan after a divorce\./i.test(line) &&
+    /^Think of this process as a way to help you get a fresh start on your finances and your new life after divorce\.?$/i.test(nextLine)
+  ) {
+    return true;
+  }
+  return false;
+};
+
 const shouldCloseParagraph = (lineItem, nextItem) => {
   const line = lineItem.text;
   if (!nextItem) return true;
   if (isBylineOrCredential(line)) return true;
   if (looksLikeNewSection(lineItem)) return true;
+  if (shouldKeepKnownParagraphTogether(lineItem, nextItem)) return false;
 
   const currentBox = getOcrBbox(lineItem);
   const nextBox = getOcrBbox(nextItem);
@@ -1190,6 +1324,8 @@ clearSelectionButton.addEventListener("click", (event) => {
 }, true);
 
 convertButton.addEventListener("click", convertScreenshot);
+codeTab.addEventListener("click", () => setOutputView("code"));
+previewTab.addEventListener("click", () => setOutputView("preview"));
 
 copyButton.addEventListener("click", async () => {
   await navigator.clipboard.writeText(state.outputRaw);

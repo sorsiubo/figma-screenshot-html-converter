@@ -102,13 +102,24 @@
             <p class="eyebrow">Output</p>
             <h2>Cleaned HTML</h2>
           </div>
-          <button class="copy-button" id="copyButton" type="button" disabled>Copy Code</button>
+          <div class="output-actions">
+            <div class="tab-toggle" role="tablist" aria-label="Output view">
+              <button class="tab-button is-active" id="codeTab" type="button" role="tab" aria-selected="true" aria-controls="codePanel">Code</button>
+              <button class="tab-button" id="previewTab" type="button" role="tab" aria-selected="false" aria-controls="previewPanel">Preview</button>
+            </div>
+            <button class="copy-button" id="copyButton" type="button" disabled>Copy Code</button>
+          </div>
         </div>
-        <pre class="code-editor" id="codeEditor"><code id="outputCode">&lt;!-- Converted HTML will appear here --&gt;</code></pre>
+        <div class="output-panel is-active" id="codePanel" role="tabpanel" aria-labelledby="codeTab">
+          <pre class="code-editor" id="codeEditor"><code id="outputCode">&lt;!-- Converted HTML will appear here --&gt;</code></pre>
+        </div>
+        <div class="output-panel" id="previewPanel" role="tabpanel" aria-labelledby="previewTab" hidden>
+          <iframe class="preview-frame" id="previewFrame" title="Rendered HTML preview" sandbox=""></iframe>
+        </div>
       </section>
     </main>
 
     <canvas id="workCanvas" hidden></canvas>
-    <script src="./app.js?v=38"></script>
+    <script src="./app.js?v=40"></script>
   </body>
 </html>
