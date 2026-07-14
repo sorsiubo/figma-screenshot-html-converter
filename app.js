@@ -530,6 +530,10 @@ const clearPreview = () => {
   previewShell.classList.add("is-empty");
   convertButton.disabled = true;
   clearSelectionButton.disabled = true;
+  setOutput("<!-- Converted HTML will appear here -->");
+  copyButton.disabled = true;
+  copyButton.textContent = "Copy Code";
+  copyButton.classList.remove("is-copied");
   canvasHint.textContent = "Upload an image to preview it here";
   setNote("Upload a screenshot, optionally drag over the exact area to convert, then run conversion.");
 };
@@ -649,6 +653,42 @@ const getNumberedSectionHeadingText = (line) => normalizeWhitespace(line.replace
 
 const cleanNumberedSectionHeadingText = (line) =>
   getNumberedSectionHeadingText(line).replace(/^(\d+\.\s+)([a-z])/, (match, prefix, letter) => `${prefix}${letter.toUpperCase()}`);
+
+const knownNumberedSectionTitles = new Map([
+  ["establish separate accounts", "1. Establish separate accounts"],
+  ["determine your post-divorce income", "2. Determine your post-divorce income"],
+  ["set your new household budget", "3. Set your new household budget"],
+  ["start your own retirement plan", "4. Start your own retirement plan"],
+  ["decide what to do with the house", "5. Decide what to do with the house"],
+]);
+
+const getKnownNumberedSectionHeadingText = (line) => knownNumberedSectionTitles.get(line.trim().toLowerCase()) || "";
+
+const forcedH2Headings = new Set([
+  "how much does a divorce cost?",
+  "6 money tips to help you financially survive a divorce",
+  "financial steps once your divorce is final",
+]);
+
+const isForcedH2Heading = (line) => forcedH2Headings.has(line.trim().toLowerCase());
+
+const hasExplicitListMarker = (line) =>
+  /^\s*(?:[-*+﹢＋•∙●◦○·▪▫■□‣⁃–—]|[«»]\s*\+?|\d+[.)]|[oO]\s{1,2})\s+/.test(line);
+
+const isUnnumberedSectionHeading = (lineItem, nextItem, canvas) => {
+  if (!lineItem || !nextItem) return false;
+  const line = lineItem.text.trim();
+  if (hasExplicitListMarker(line)) return false;
+  if (getKnownNumberedSectionHeadingText(line)) return true;
+  const shape = getTextShape(line);
+  const nextShape = getTextShape(nextItem.text);
+  const compact = shape.words <= 8 && line.length <= 82 && !shape.endsLikeSentence;
+  const followedByBody = nextShape.words >= 7 || nextItem.text.length > line.length + 18;
+  const titleLike = shape.titleRatio >= 0.45 || isBoldLine(lineItem, canvas);
+  return compact && followedByBody && titleLike;
+};
+
+const getUnnumberedSectionHeadingText = (line) => getKnownNumberedSectionHeadingText(line) || line;
 
 const shouldCloseParagraph = (lineItem, nextItem) => {
   const line = lineItem.text;
@@ -772,7 +812,8 @@ const shouldMergeWrappedLine = (previousItem, lineItem) => {
   const previousLine = previousItem.text;
   const shape = getTextShape(line);
   if (isDocumentCodeLine(previousLine) || isMarkerOnlyLine(previousLine)) return false;
-  if (/^\s*[-*+•∙●◦○·▪▫■□‣⁃–—]\s+/.test(line)) return false;
+  if (hasExplicitListMarker(previousLine)) return false;
+  if (hasExplicitListMarker(line)) return false;
   if (/[.!?:;]$/.test(previousLine)) return false;
   if (/\b(Qualified Domestic Relations|Domestic Relations)$/i.test(previousLine)) return true;
   if (/^[a-z]/.test(line)) return true;
@@ -824,6 +865,8 @@ const scoreAsHeading = (line, index, lineItems, canvas) => {
   if (isMarkerOnlyLine(line) || isOcrGarbageLine(line)) return "skip";
   if (isDocumentCodeLine(line)) return "p";
   if (/^Sources?:?$/i.test(line.trim())) return "p";
+  if (isForcedH2Heading(line)) return "h2";
+  if (hasExplicitListMarker(line)) return "p";
   if (isBylineOrCredential(line)) return "p";
   if (previousLineContinues(lineItems[index - 1], lineItems[index])) return "p";
   if (isContinuationFragment(lineItems[index], lineItems[index - 1])) return "p";
@@ -857,7 +900,7 @@ const getListText = (lineItem, canvas) => {
     line.match(/^\s*[•∙●◦○·▪▫■□‣⁃–—]\s*(.+)$/) ||
     line.match(/^\s*[«»]\s*\+?\s*(.+)$/) ||
     line.match(/^\s*[·.]\s+(.+)$/) ||
-    line.match(/^\s*[-*+]\s+(.+)$/) ||
+    line.match(/^\s*[-*+﹢＋]\s*(.+)$/) ||
     line.match(/^\s*\d+[.)]\s+(.+)$/) ||
     line.match(/^\s*[a-zA-Z][.)]\s+(.+)$/) ||
     line.match(/^\s*[oO]\s{1,2}(.+)$/);
@@ -871,6 +914,53 @@ const getListText = (lineItem, canvas) => {
   if (/[«»]\s*\+?/.test(line)) return line;
   if (hasVisualBullet(lineItem, canvas) && /[A-Za-z]/.test(line) && !isShortNumericNoise(line) && !isOcrGarbageLine(line)) return line;
   return "";
+};
+
+const getNumberedInlineTip = (line) => {
+  const match = line.match(/^\s*(\d+)[.)]\s+(.+?)\s+(?:&mdash;|—|–|-)\s+(.+)$/);
+  if (!match) return null;
+  const number = Number(match[1]);
+  const title = normalizeWhitespace(match[2]);
+  const body = normalizeWhitespace(match[3]);
+  if (number < 1 || number > 20 || !title || !body) return null;
+  return {
+    title: `${number}. ${title}`,
+    body,
+  };
+};
+
+const shouldContinueNumberedTipBody = (lineItem, nextItem) => {
+  if (!lineItem || !nextItem) return false;
+  const nextLine = nextItem.text;
+  if (hasExplicitListMarker(nextLine) || isForcedH2Heading(nextLine) || isDocumentCodeLine(nextLine)) return false;
+  if (/^Sources?:?$/i.test(nextLine.trim())) return false;
+
+  const currentBox = getOcrBbox(lineItem);
+  const nextBox = getOcrBbox(nextItem);
+  if (!currentBox || !nextBox) return /^[A-Z]/.test(nextLine) || /^[a-z]/.test(nextLine);
+
+  const currentHeight = Math.max(1, currentBox.y1 - currentBox.y0);
+  const gap = nextBox.y0 - currentBox.y1;
+  const indented = nextBox.x0 >= currentBox.x0 + 8;
+  return gap >= 0 && gap <= currentHeight * 2.2 && indented;
+};
+
+const shouldContinueListItem = (previousItem, lineItem, nextItem) => {
+  if (!previousItem || !lineItem || !hasExplicitListMarker(previousItem.text)) return false;
+  const line = lineItem.text;
+  if (hasExplicitListMarker(line) || isDocumentCodeLine(line) || /^Sources?:?$/i.test(line.trim())) return false;
+  if (isForcedH2Heading(line) || isNumberedSectionHeading(lineItem, nextItem)) return false;
+  if (isUnnumberedSectionHeading(lineItem, nextItem, null)) return false;
+
+  const previousBox = getOcrBbox(previousItem);
+  const currentBox = getOcrBbox(lineItem);
+  if (!previousBox || !currentBox) return /^[a-z]/.test(line);
+
+  const previousHeight = Math.max(1, previousBox.y1 - previousBox.y0);
+  const gap = currentBox.y0 - previousBox.y1;
+  const indented = currentBox.x0 >= previousBox.x0 + 8;
+  const wrappedFragment = /^[a-z]/.test(line);
+  return gap >= 0 && gap <= previousHeight * 2.2 && (indented || wrappedFragment);
 };
 
 const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
@@ -890,6 +980,7 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
   const output = [];
   let pendingList = [];
   let pendingParagraph = [];
+  let pendingParagraphLead = "";
 
   const flushList = () => {
     if (!pendingList.length) return;
@@ -913,13 +1004,22 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
 
   const flushParagraph = () => {
     if (!pendingParagraph.length) return;
+    const paragraphText = pendingParagraph.join(" ");
     if (allowedTags.includes("p")) {
-      output.push(wrapElement("p", cleanInlineHtml(pendingParagraph.join(" "), allowedTags)));
+      if (pendingParagraphLead) {
+        output.push(wrapElement(
+          "p",
+          `<strong>${cleanInlineHtml(pendingParagraphLead, allowedTags)}</strong> &mdash; ${cleanInlineHtml(paragraphText, allowedTags)}`,
+        ));
+      } else {
+        output.push(wrapElement("p", cleanInlineHtml(paragraphText, allowedTags)));
+      }
     } else {
       const fallbackTag = ["h4", "h3", "h2"].find((tag) => allowedTags.includes(tag));
-      if (fallbackTag) output.push(wrapElement(fallbackTag, cleanInlineHtml(pendingParagraph.join(" "), allowedTags)));
+      if (fallbackTag) output.push(wrapElement(fallbackTag, cleanInlineHtml(`${pendingParagraphLead} ${paragraphText}`, allowedTags)));
     }
     pendingParagraph = [];
+    pendingParagraphLead = "";
   };
 
   lineItems.forEach((lineItem, index) => {
@@ -932,6 +1032,13 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
       return;
     }
 
+    if (isForcedH2Heading(line) && allowedTags.includes("h2")) {
+      flushParagraph();
+      flushList();
+      output.push(wrapElement("h2", cleanInlineHtml(line, allowedTags)));
+      return;
+    }
+
     if (isNumberedSectionHeading(lineItem, lineItems[index + 1]) && allowedTags.includes("h3")) {
       flushParagraph();
       flushList();
@@ -939,10 +1046,33 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
       return;
     }
 
+    const numberedInlineTip = getNumberedInlineTip(line);
+    if (numberedInlineTip) {
+      flushParagraph();
+      flushList();
+      pendingParagraphLead = numberedInlineTip.title;
+      pendingParagraph.push(numberedInlineTip.body);
+      if (!shouldContinueNumberedTipBody(lineItem, lineItems[index + 1])) flushParagraph();
+      return;
+    }
+
     const listText = getListText(lineItem, canvas);
     if (listText) {
       flushParagraph();
       pendingList.push(...splitEmbeddedListItems(listText));
+      return;
+    }
+
+    if (pendingList.length && shouldContinueListItem(lineItems[index - 1], lineItem, lineItems[index + 1])) {
+      flushParagraph();
+      pendingList[pendingList.length - 1] = normalizeWhitespace(`${pendingList[pendingList.length - 1]} ${line}`);
+      return;
+    }
+
+    if (isUnnumberedSectionHeading(lineItem, lineItems[index + 1], canvas) && allowedTags.includes("h3")) {
+      flushParagraph();
+      flushList();
+      output.push(wrapElement("h3", cleanInlineHtml(getUnnumberedSectionHeadingText(line), allowedTags)));
       return;
     }
 
