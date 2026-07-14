@@ -78,6 +78,9 @@ const getHref = (value) => {
 const linkedTextPhrases = [
   "AnnualCreditReport.com",
   "estate planning",
+  "Investopedia",
+  "LegalZoom",
+  "post-divorce finances",
   "Privacy Policy",
   "Do not sell my personal information",
   "Limit the use of my sensitive personal information",
@@ -139,6 +142,12 @@ const cleanInlineHtml = (value, allowedTags) => {
 
 const normalizeWhitespace = (value) => value.replace(/\s+/g, " ").trim();
 
+const cleanOcrText = (value) =>
+  value
+    .replace(/\balist\b/gi, "a list")
+    .replace(/\bcan difficult\b/gi, "can be difficult")
+    .replace(/\bsoon to be\b/gi, "soon-to-be");
+
 const highlightHtml = (value) => {
   const escaped = escapeHtml(value);
   return escaped.replace(
@@ -179,6 +188,8 @@ const tagClasses = {
 };
 
 const wrapElement = (tag, content) => `<${tag}${tagClasses[tag] || ""}>${content}</${tag}>`;
+
+const wrapImageElement = (altText = "Image") => `<img src="#" alt="${cleanHtmlText(altText)}" />`;
 
 const getOcrBbox = (line) => {
   const bbox = line?.bbox;
@@ -621,6 +632,24 @@ const getTextShape = (line) => {
   return { words, upperRatio, titleRatio, endsLikeSentence };
 };
 
+const isNumberedSectionHeading = (lineItem, nextItem) => {
+  if (!lineItem || !nextItem) return false;
+  const match = lineItem.text.match(/^\s*(\d+)[.)]\s+(.+)$/);
+  if (!match) return false;
+  const number = Number(match[1]);
+  const title = match[2];
+  const titleShape = getTextShape(title);
+  const nextShape = getTextShape(nextItem.text);
+  const compact = titleShape.words <= 9 && title.length <= 85;
+  const followedByBody = nextShape.words >= 7 || nextItem.text.length > title.length + 16;
+  return number >= 1 && number <= 20 && compact && followedByBody;
+};
+
+const getNumberedSectionHeadingText = (line) => normalizeWhitespace(line.replace(/^\s*(\d+)[.)]\s+/, "$1. "));
+
+const cleanNumberedSectionHeadingText = (line) =>
+  getNumberedSectionHeadingText(line).replace(/^(\d+\.\s+)([a-z])/, (match, prefix, letter) => `${prefix}${letter.toUpperCase()}`);
+
 const shouldCloseParagraph = (lineItem, nextItem) => {
   const line = lineItem.text;
   if (!nextItem) return true;
@@ -668,6 +697,20 @@ const isOcrGarbageLine = (line) => {
   if (/[{}]/.test(text) && text.length <= 12) return true;
   return /^[a-z]{1,4}[)}\]]$/i.test(text);
 };
+
+const getImagePlaceholderText = (line) => {
+  const match = line.match(/^\s*(?:\[?\s*(?:img|image|photo|picture|graphic|illustration)\s*\]?)(?::|\s+-\s+)?\s*(.*?)\s*$/i);
+  if (!match) return "";
+  return normalizeWhitespace(match[1] || "Image");
+};
+
+const splitEmbeddedListItems = (text) =>
+  text
+    .replace(/\s*[«»]\s*\+?\s*/g, "\n")
+    .replace(/\s+[•∙●◦○·▪▫■□‣⁃]\s+/g, "\n")
+    .split(/\n+/)
+    .map((item) => normalizeWhitespace(item.replace(/^\+\s+/, "")))
+    .filter((item) => item && !isOcrGarbageLine(item) && !isShortNumericNoise(item));
 
 const repairDocumentCodeLine = (line) => {
   const documentCode = getUploadedDocumentCode();
@@ -731,6 +774,7 @@ const shouldMergeWrappedLine = (previousItem, lineItem) => {
   if (isDocumentCodeLine(previousLine) || isMarkerOnlyLine(previousLine)) return false;
   if (/^\s*[-*+•∙●◦○·▪▫■□‣⁃–—]\s+/.test(line)) return false;
   if (/[.!?:;]$/.test(previousLine)) return false;
+  if (/\b(Qualified Domestic Relations|Domestic Relations)$/i.test(previousLine)) return true;
   if (/^[a-z]/.test(line)) return true;
   if (!/^[a-z]/.test(line) && (shape.words > 8 || line.length > 90)) return false;
   if (previousLineContinues(previousItem, lineItem)) return true;
@@ -811,6 +855,7 @@ const getListText = (lineItem, canvas) => {
   const line = lineItem.text;
   const listMatch =
     line.match(/^\s*[•∙●◦○·▪▫■□‣⁃–—]\s*(.+)$/) ||
+    line.match(/^\s*[«»]\s*\+?\s*(.+)$/) ||
     line.match(/^\s*[·.]\s+(.+)$/) ||
     line.match(/^\s*[-*+]\s+(.+)$/) ||
     line.match(/^\s*\d+[.)]\s+(.+)$/) ||
@@ -823,6 +868,7 @@ const getListText = (lineItem, canvas) => {
     if (isShortNumericNoise(text)) return "";
     return /[A-Za-z0-9]/.test(text) ? text : "";
   }
+  if (/[«»]\s*\+?/.test(line)) return line;
   if (hasVisualBullet(lineItem, canvas) && /[A-Za-z]/.test(line) && !isShortNumericNoise(line) && !isOcrGarbageLine(line)) return line;
   return "";
 };
@@ -832,7 +878,7 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
     dedupeDocumentCodeLines(
       getLineItems(ocrData).map((lineItem) => ({
         ...lineItem,
-        text: repairDocumentCodeLine(lineItem.text),
+        text: cleanOcrText(repairDocumentCodeLine(lineItem.text)),
       })),
     ),
   );
@@ -878,10 +924,25 @@ const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
 
   lineItems.forEach((lineItem, index) => {
     const line = lineItem.text;
+    const imageAltText = getImagePlaceholderText(line);
+    if (imageAltText && allowedTags.includes("img")) {
+      flushParagraph();
+      flushList();
+      output.push(wrapImageElement(imageAltText));
+      return;
+    }
+
+    if (isNumberedSectionHeading(lineItem, lineItems[index + 1]) && allowedTags.includes("h3")) {
+      flushParagraph();
+      flushList();
+      output.push(wrapElement("h3", cleanInlineHtml(cleanNumberedSectionHeadingText(line), allowedTags)));
+      return;
+    }
+
     const listText = getListText(lineItem, canvas);
     if (listText) {
       flushParagraph();
-      pendingList.push(listText);
+      pendingList.push(...splitEmbeddedListItems(listText));
       return;
     }
 
