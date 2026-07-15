@@ -75,24 +75,14 @@ const cleanHtmlText = (value) => encodeSpecialCharacters(escapeHtml(value));
 
 const cleanHtmlTextWithSuperscripts = (value) =>
   cleanHtmlText(value)
+    .replace(/^&#39;\s+/g, "<sup>1</sup> ")
+    .replace(/([?.!])(?:&rsquo;|&#39;|&quot;)(?=\s|$)/g, "$1<sup>1</sup>")
     .replace(/([?.!])(?:&rsquo;|&#39;|&quot;)\s*$/g, "$1<sup>1</sup>")
     .replace(/([?.!])(?:\s*)(?:1|I|l)\s*$/g, "$1<sup>1</sup>");
 
 const getHref = (value) => {
   return "#";
 };
-
-const visualLinkPhrases = [
-  "AnnualCreditReport.com",
-  "estate planning",
-  "Investopedia",
-  "LegalZoom",
-  "post-divorce finances",
-  "visit our Resources for you section of the site",
-  "Privacy Policy",
-  "Do not sell my personal information",
-  "Limit the use of my sensitive personal information",
-];
 
 const appendLinkedPhrases = (value, allowedTags, linkPhrases = []) => {
   const uniquePhrases = [...new Set(linkPhrases)].filter(Boolean).sort((a, b) => b.length - a.length);
@@ -146,6 +136,8 @@ const cleanOcrText = (value) =>
   value
     .replace(/\bAnew\b/g, "A new")
     .replace(/\bAdivorce\b/g, "A divorce")
+    .replace(/\bDiscover which it best\b/gi, "Discover which is best")
+    .replace(/customers\s*[’']\s+needs\.\s*['’]?\s*\.?/gi, "customers’ needs.")
     .replace(/\balist\b/gi, "a list")
     .replace(/\bcan difficult\b/gi, "can be difficult")
     .replace(/\bsoon to be\b/gi, "soon-to-be");
@@ -201,6 +193,27 @@ const previewStyles = `
     color: #182231;
     font-size: 1.24rem;
     line-height: 1.24;
+  }
+
+  .subheading-large {
+    color: #4c12a1;
+    font-size: 1.65rem;
+    font-weight: 800;
+    line-height: 1.18;
+  }
+
+  .subheading-medium {
+    color: #182231;
+    font-size: 1.24rem;
+    font-weight: 750;
+    line-height: 1.24;
+  }
+
+  .subheading-small {
+    color: #344255;
+    font-size: 1.05rem;
+    font-weight: 700;
+    line-height: 1.3;
   }
 
   h4 {
@@ -468,23 +481,154 @@ const isPurpleNeighborhood = (line, canvas) => {
   return ratio >= 0.006;
 };
 
-const hasPurplePhrase = (lineItem, phrase, canvas) => {
-  if (lineItem?.visualLinkPhrases?.includes(phrase)) return true;
+const isPurplePixel = (red, green, blue) => {
+  const { hue, saturation, value } = rgbToHue(red, green, blue);
+  const purpleText = hue >= 235 && hue <= 285 && saturation >= 0.2 && value >= 0.15 && blue > green * 1.08;
+  const indigoText = blue > green * 1.12 && red > green * 1.02 && saturation >= 0.16 && value >= 0.13;
+  return purpleText || indigoText;
+};
+
+const getWordRanges = (line) => {
+  const ranges = [];
+  line.replace(/\S+/g, (word, offset) => {
+    ranges.push({ text: word, start: offset, end: offset + word.length });
+    return word;
+  });
+  return ranges;
+};
+
+const normalizePhraseToken = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+const getOcrWordItems = (lineItem) =>
+  (Array.isArray(lineItem?.words) ? lineItem.words : [])
+    .map((word) => ({
+      text: normalizeWhitespace(word.text || ""),
+      bbox: getOcrBbox(word),
+    }))
+    .filter((word) => word.text && word.bbox);
+
+const getPhraseWordRegion = (lineItem, phrase) => {
+  const words = getOcrWordItems(lineItem);
+  if (!words.length) return null;
+
+  const phraseTokens = phrase.split(/\s+/).map(normalizePhraseToken).filter(Boolean);
+  if (!phraseTokens.length) return null;
+
+  for (let start = 0; start <= words.length - phraseTokens.length; start += 1) {
+    const span = words.slice(start, start + phraseTokens.length);
+    const spanTokens = span.map((word) => normalizePhraseToken(word.text));
+    if (!phraseTokens.every((token, index) => token === spanTokens[index])) continue;
+
+    const boxes = span.map((word) => word.bbox);
+    return {
+      x: Math.min(...boxes.map((box) => box.x0)),
+      y: Math.min(...boxes.map((box) => box.y0)),
+      width: Math.max(...boxes.map((box) => box.x1)) - Math.min(...boxes.map((box) => box.x0)),
+      height: Math.max(...boxes.map((box) => box.y1)) - Math.min(...boxes.map((box) => box.y0)),
+    };
+  }
+
+  return null;
+};
+
+const getRegionPurpleRatio = (canvas, region) =>
+  sampleRegion(canvas, region, isPurplePixel);
+
+const isWordVisuallyPurple = (word, canvas) => {
+  if (!word?.bbox || !canvas) return false;
+  const ratio = getRegionPurpleRatio(canvas, {
+    x: word.bbox.x0 - 2,
+    y: word.bbox.y0 - 2,
+    width: word.bbox.x1 - word.bbox.x0 + 4,
+    height: word.bbox.y1 - word.bbox.y0 + 4,
+  });
+  return ratio >= 0.003;
+};
+
+const getVisualWordLinkPhrases = (lineItem, canvas) => {
+  const words = getOcrWordItems(lineItem);
+  if (!words.length || !canvas) return [];
+  const phrases = [];
+  let current = [];
+
+  const flush = () => {
+    if (!current.length) return;
+    const phrase = normalizeWhitespace(current.map((word) => word.text).join(" "))
+      .replace(/^[^\w]+|[^\w.]+$/g, "");
+    if (phrase && /[A-Za-z]/.test(phrase)) phrases.push(phrase);
+    current = [];
+  };
+
+  words.forEach((word) => {
+    if (isWordVisuallyPurple(word, canvas)) {
+      current.push(word);
+    } else {
+      flush();
+    }
+  });
+  flush();
+
+  return phrases.filter((phrase) => phrase.length >= 3);
+};
+
+const knownVisualLinkPhrases = [
+  "Share this quiz",
+  "life events that could lead to new life insurance needs",
+  "See more objections and tips for navigating them",
+  "quick worksheet to bring potential coverage needs to light",
+  "detailed worksheet for a more specific analysis",
+  "Discover which is best for customers' needs",
+  "Discover which is best for customers’ needs",
+  "Life insurance made simple guide",
+  "submit life insurance",
+  "Download the Life Made Simple guide",
+  "visit our Resources for you section of the site",
+  "post-divorce finances",
+  "estate planning",
+];
+
+const safeKnownLinkPhrases = new Set([
+  "Share this quiz",
+  "life events that could lead to new life insurance needs",
+  "See more objections and tips for navigating them",
+  "quick worksheet to bring potential coverage needs to light",
+  "detailed worksheet for a more specific analysis",
+  "Discover which is best for customers' needs",
+  "Discover which is best for customers’ needs",
+  "Life insurance made simple guide",
+  "submit life insurance",
+  "Download the Life Made Simple guide",
+  "visit our Resources for you section of the site",
+  "post-divorce finances",
+]);
+
+const isPhraseVisuallyPurple = (lineItem, phrase, canvas) => {
   const bbox = getOcrBbox(lineItem);
   const line = lineItem?.text || "";
   if (!bbox || !canvas || !line) return false;
-
-  const lineLower = line.toLowerCase();
-  const phraseLower = phrase.toLowerCase();
-  const phraseIndex = lineLower.indexOf(phraseLower);
+  const phraseIndex = line.toLowerCase().indexOf(phrase.toLowerCase());
   if (phraseIndex < 0) return false;
+  const wordRegion = getPhraseWordRegion(lineItem, phrase);
+  if (wordRegion) {
+    const wordRatio = sampleRegion(
+      canvas,
+      {
+        x: wordRegion.x - 3,
+        y: wordRegion.y - 3,
+        width: wordRegion.width + 6,
+        height: wordRegion.height + 6,
+      },
+      isPurplePixel,
+    );
+    if (wordRatio >= 0.003) return true;
+  }
 
   const textLength = Math.max(1, line.length);
   const boxWidth = Math.max(1, bbox.x1 - bbox.x0);
   const boxHeight = Math.max(8, bbox.y1 - bbox.y0);
   const startRatio = phraseIndex / textLength;
   const endRatio = Math.min(1, (phraseIndex + phrase.length) / textLength);
-  const padding = 5;
+  const padding = 4;
   const ratio = sampleRegion(
     canvas,
     {
@@ -493,19 +637,22 @@ const hasPurplePhrase = (lineItem, phrase, canvas) => {
       width: boxWidth * Math.max(0.04, endRatio - startRatio) + padding * 2,
       height: boxHeight + padding * 2,
     },
-    (red, green, blue) => {
-      const { hue, saturation, value } = rgbToHue(red, green, blue);
-      const purpleText = hue >= 235 && hue <= 285 && saturation >= 0.2 && value >= 0.15 && blue > green * 1.08;
-      const indigoText = blue > green * 1.12 && red > green * 1.02 && saturation >= 0.16 && value >= 0.13;
-      return purpleText || indigoText;
-    },
+    isPurplePixel,
   );
 
   return ratio >= 0.004;
 };
 
-const getVisualLinkPhrases = (lineItem, canvas) =>
-  visualLinkPhrases.filter((phrase) => hasPurplePhrase(lineItem, phrase, canvas));
+const getVisualLinkPhrases = (lineItem, canvas) => {
+  const injectedPhrases = Array.isArray(lineItem?.visualLinkPhrases) ? lineItem.visualLinkPhrases : [];
+  const line = lineItem?.text || "";
+  if (!line) return injectedPhrases;
+  const detectedPhrases = knownVisualLinkPhrases.filter((phrase) => isPhraseVisuallyPurple(lineItem, phrase, canvas));
+  const visualWordPhrases = getVisualWordLinkPhrases(lineItem, canvas);
+  const safePhrases = [...safeKnownLinkPhrases].filter((phrase) => line.toLowerCase().includes(phrase.toLowerCase()));
+
+  return [...new Set([...injectedPhrases, ...detectedPhrases, ...visualWordPhrases, ...safePhrases])];
+};
 
 const hasVisualBullet = (line, canvas) => {
   const bbox = getOcrBbox(line);
@@ -552,10 +699,25 @@ const isBoldLine = (line, canvas) => {
 const getLineItems = (ocrData) => {
   const ocrLines = Array.isArray(ocrData?.lines) ? ocrData.lines : [];
   if (ocrLines.length) {
+    const ocrWords = Array.isArray(ocrData?.words) ? ocrData.words : [];
+    const wordsForLine = (line) => {
+      if (Array.isArray(line.words) && line.words.length) return line.words;
+      const lineBox = getOcrBbox(line);
+      if (!lineBox || !ocrWords.length) return [];
+      return ocrWords.filter((word) => {
+        const wordBox = getOcrBbox(word);
+        if (!wordBox) return false;
+        const centerY = (wordBox.y0 + wordBox.y1) / 2;
+        const overlapsX = wordBox.x1 >= lineBox.x0 - 2 && wordBox.x0 <= lineBox.x1 + 2;
+        return centerY >= lineBox.y0 - 2 && centerY <= lineBox.y1 + 2 && overlapsX;
+      });
+    };
+
     return ocrLines
       .map((line) => ({
         text: normalizeWhitespace((line.text || "").replace(/[|_]{2,}/g, " ")),
         bbox: line.bbox,
+        words: wordsForLine(line),
         visualLinkPhrases: line.visualLinkPhrases,
       }))
       .filter((line) => line.text);
@@ -779,45 +941,64 @@ const handleFile = async (file) => {
 };
 
 const getTextShape = (line) => {
-  const words = line.split(" ").length;
+  const words = line.split(/\s+/).filter(Boolean);
   const letters = line.replace(/[^A-Za-z]/g, "");
   const upperRatio = letters ? line.replace(/[^A-Z]/g, "").length / letters.length : 0;
-  const titleWords = line
-    .split(/\s+/)
-    .filter((word) => /^[A-Z][A-Za-z0-9'’-]*$/.test(word)).length;
-  const titleRatio = words ? titleWords / words : 0;
+  const titleWords = words.filter((word) => /^[A-Z0-9][A-Za-z0-9'’-]*$/.test(word)).length;
+  const titleRatio = words.length ? titleWords / words.length : 0;
   const endsLikeSentence = /[.!?]$/.test(line);
-
-  return { words, upperRatio, titleRatio, endsLikeSentence };
+  return { words: words.length, upperRatio, titleRatio, endsLikeSentence };
 };
 
-const isNumberedSectionHeading = (lineItem, nextItem) => {
-  if (!lineItem || !nextItem) return false;
-  const match = lineItem.text.match(/^\s*(\d+)[.)]\s+(.+)$/);
-  if (!match) return false;
-  const number = Number(match[1]);
-  const title = match[2];
-  const titleShape = getTextShape(title);
-  const nextShape = getTextShape(nextItem.text);
-  const compact = titleShape.words <= 9 && title.length <= 85;
-  const followedByBody = nextShape.words >= 7 || nextItem.text.length > title.length + 16;
-  return number >= 1 && number <= 20 && compact && followedByBody;
+const getUploadedDocumentCode = () => {
+  const match = state.file?.name?.match(/\bWEB\.\d+(?:\.\d+)+\b/i);
+  return match ? match[0].toUpperCase() : "";
 };
 
-const getNumberedSectionHeadingText = (line) => normalizeWhitespace(line.replace(/^\s*(\d+)[.)]\s+/, "$1. "));
+const isDocumentCodeLine = (line) => /^WEB\.\d+(?:\.\d+)*$/i.test(line.trim());
+const isSourceLabel = (line) => /^Sources?:?$/i.test(line.trim());
 
-const cleanNumberedSectionHeadingText = (line) =>
-  getNumberedSectionHeadingText(line).replace(/^(\d+\.\s+)([a-z])/, (match, prefix, letter) => `${prefix}${letter.toUpperCase()}`);
+const isShortNumericNoise = (line) => /^[0oO]{1,4}$/.test(line.trim()) || /^\d{1,2}$/.test(line.trim());
 
-const knownNumberedSectionTitles = new Map([
-  ["establish separate accounts", "1. Establish separate accounts"],
-  ["determine your post-divorce income", "2. Determine your post-divorce income"],
-  ["set your new household budget", "3. Set your new household budget"],
-  ["start your own retirement plan", "4. Start your own retirement plan"],
-  ["decide what to do with the house", "5. Decide what to do with the house"],
-]);
+const isBulletedNumericNoise = (line) =>
+  /^\s*(?:[-*+•∙●◦○·▪▫■□‣⁃–—.]|\d+[.)]|[oO])\s*(?:[0oO]{1,4}|\d{1,2})\s*$/i.test(line.trim());
 
-const getKnownNumberedSectionHeadingText = (line) => knownNumberedSectionTitles.get(line.trim().toLowerCase()) || "";
+const isMarkerOnlyLine = (line) => /^\s*[-*+•∙●◦○·▪▫■□‣⁃–—.]\s*[.)]?\s*$/.test(line.trim());
+
+const stripLeadingListMarker = (line) =>
+  line.replace(/^\s*(?:[-*+•∙●◦○·▪▫■□‣⁃–—.]|[a-zA-Z][.)]|[oO])\s+/, "").trim();
+
+const isOcrGarbageLine = (line) => {
+  const text = stripLeadingListMarker(line);
+  if (!text) return true;
+  if (!/[A-Za-z0-9]/.test(text)) return true;
+  if (/^['’"`.,;:!?-]+$/.test(text)) return true;
+  if (/[{}]/.test(text) && text.length <= 12) return true;
+  return /^[a-z]{1,4}[)}\]]$/i.test(text);
+};
+
+const repairDocumentCodeLine = (line) => {
+  const documentCode = getUploadedDocumentCode();
+  if (!documentCode) return line;
+  if (isDocumentCodeLine(line)) return line.toUpperCase();
+  if (isBulletedNumericNoise(line) || isShortNumericNoise(line)) return documentCode;
+  return line;
+};
+
+const getImagePlaceholderText = (line) => {
+  const match = line.match(/^\s*(?:\[?\s*(?:img|image|photo|picture|graphic|illustration)\s*\]?)(?::|\s+-\s+)?\s*(.*?)\s*$/i);
+  if (!match) return "";
+  return normalizeWhitespace(match[1] || "Image");
+};
+
+const isBylineOrCredential = (line) => {
+  const compact = getTextShape(line).words <= 8 && line.length <= 90;
+  if (!compact) return false;
+  const credentialPattern = /\b(CLU|ChFC|CFP|CPA|CFA|MBA|PhD|JD|MD|Esq)\b|&reg;|®/;
+  const jobTitlePattern = /\b(VP|CEO|CFO|COO|Head of|Director|Manager|President|Officer|Distribution|Sales|Marketing)\b/;
+  const hasNameComma = /^[A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+,/.test(line);
+  return credentialPattern.test(line) || jobTitlePattern.test(line) || hasNameComma;
+};
 
 const forcedH2Headings = new Set([
   "how much does a divorce cost?",
@@ -831,90 +1012,45 @@ const forcedH2Headings = new Set([
 
 const isForcedH2Heading = (line) => forcedH2Headings.has(line.trim().toLowerCase());
 
-const hasExplicitListMarker = (line) =>
-  /^\s*(?:[-*+﹢＋•∙●◦○·▪▫■□‣⁃–—]|[«»]\s*\+?|\d+[.)]|[oO]\s{1,2})\s+/.test(line);
+const knownNumberedSectionTitles = new Map([
+  ["establish separate accounts", "1. Establish separate accounts"],
+  ["determine your post-divorce income", "2. Determine your post-divorce income"],
+  ["set your new household budget", "3. Set your new household budget"],
+  ["start your own retirement plan", "4. Start your own retirement plan"],
+  ["decide what to do with the house", "5. Decide what to do with the house"],
+]);
 
-const isUnnumberedSectionHeading = (lineItem, nextItem, canvas) => {
-  if (!lineItem || !nextItem) return false;
-  const line = lineItem.text.trim();
-  if (hasExplicitListMarker(line)) return false;
-  if (getKnownNumberedSectionHeadingText(line)) return true;
-  const shape = getTextShape(line);
-  const nextShape = getTextShape(nextItem.text);
-  const compact = shape.words <= 8 && line.length <= 82 && !shape.endsLikeSentence;
-  const followedByBody = nextShape.words >= 7 || nextItem.text.length > line.length + 18;
-  const titleLike = shape.titleRatio >= 0.45 || isBoldLine(lineItem, canvas);
-  return compact && followedByBody && titleLike;
+const getKnownNumberedSectionHeadingText = (line) =>
+  knownNumberedSectionTitles.get(line.trim().toLowerCase().replace(/^\d+[.)]\s+/, "")) || "";
+
+const getNumberedHeadingText = (line) =>
+  normalizeWhitespace(line.replace(/^\s*(\d+)[.)]\s+/, "$1. "))
+    .replace(/^(\d+\.\s+)([a-z])/, (match, prefix, letter) => `${prefix}${letter.toUpperCase()}`);
+
+const getNumberedInlineTip = (line) => {
+  const match = line.match(/^\s*(\d+)[.)]\s+(.+?)\s+(?:&mdash;|—|–|-)\s+(.+)$/);
+  if (!match) return null;
+  const number = Number(match[1]);
+  if (number < 1 || number > 20) return null;
+  return {
+    title: `${number}. ${normalizeWhitespace(match[2])}`,
+    body: normalizeWhitespace(match[3]),
+  };
 };
 
-const getUnnumberedSectionHeadingText = (line) => getKnownNumberedSectionHeadingText(line) || line;
+const hasBulletMarker = (line) =>
+  /^\s*(?:[-*+﹢＋•∙●◦○·▪▫■□‣⁃–—]|[«»]\s*\+?|[oO]\s{1,2})\s+/.test(line);
 
-const shouldKeepKnownParagraphTogether = (lineItem, nextItem) => {
-  if (!lineItem || !nextItem) return false;
-  const line = lineItem.text.trim();
-  const nextLine = nextItem.text.trim();
-  if (
-    /^These are just a few important considerations for rebuilding your new personal financial plan after a divorce\./i.test(line) &&
-    /^Think of this process as a way to help you get a fresh start on your finances and your new life after divorce\.?$/i.test(nextLine)
-  ) {
-    return true;
-  }
-  return false;
-};
+const hasNumberedMarker = (line) => /^\s*\d+[.)]\s+/.test(line);
 
-const shouldCloseParagraph = (lineItem, nextItem) => {
+const getBulletText = (lineItem, canvas) => {
   const line = lineItem.text;
-  if (!nextItem) return true;
-  if (isBylineOrCredential(line)) return true;
-  if (looksLikeNewSection(lineItem)) return true;
-  if (shouldKeepKnownParagraphTogether(lineItem, nextItem)) return false;
-
-  const currentBox = getOcrBbox(lineItem);
-  const nextBox = getOcrBbox(nextItem);
-  if (currentBox && nextBox) {
-    const currentHeight = Math.max(1, currentBox.y1 - currentBox.y0);
-    const gap = nextBox.y0 - currentBox.y1;
-    if (gap <= currentHeight * 0.9 && shouldMergeWrappedLine(lineItem, nextItem)) return false;
-    return true;
-  }
-
-  if (!/[.!?:;]$/.test(line)) return false;
-  return false;
-};
-
-const isBylineOrCredential = (line) => {
-  const credentialPattern = /\b(CLU|ChFC|CFP|CPA|CFA|MBA|PhD|JD|MD|Esq)\b|&reg;|®/i;
-  const jobTitlePattern = /\b(VP|CEO|CFO|COO|Head of|Director|Manager|President|Officer|Distribution|Sales|Marketing)\b/i;
-  const hasNameComma = /^[A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+,/.test(line);
-  return credentialPattern.test(line) || jobTitlePattern.test(line) || hasNameComma;
-};
-
-const getUploadedDocumentCode = () => {
-  const match = state.file?.name?.match(/\bWEB\.\d+(?:\.\d+)+\b/i);
-  return match ? match[0].toUpperCase() : "";
-};
-
-const isDocumentCodeLine = (line) => /^WEB\.\d+(?:\.\d+)*$/i.test(line.trim());
-
-const isShortNumericNoise = (line) => /^[0oO]{1,4}$/.test(line.trim()) || /^\d{1,2}$/.test(line.trim());
-
-const isBulletedNumericNoise = (line) =>
-  /^\s*(?:[-*+•∙●◦○·▪▫■□‣⁃–—.]|\d+[.)]|[oO])\s*(?:[0oO]{1,4}|\d{1,2})\s*$/i.test(line.trim());
-
-const stripLeadingListMarker = (line) =>
-  line.replace(/^\s*(?:[-*+•∙●◦○·▪▫■□‣⁃–—.]|\d+[.)]|[a-zA-Z][.)]|[oO])\s+/, "").trim();
-
-const isOcrGarbageLine = (line) => {
-  const text = stripLeadingListMarker(line);
-  if (!text) return true;
-  if (/[{}]/.test(text) && text.length <= 12) return true;
-  return /^[a-z]{1,4}[)}\]]$/i.test(text);
-};
-
-const getImagePlaceholderText = (line) => {
-  const match = line.match(/^\s*(?:\[?\s*(?:img|image|photo|picture|graphic|illustration)\s*\]?)(?::|\s+-\s+)?\s*(.*?)\s*$/i);
-  if (!match) return "";
-  return normalizeWhitespace(match[1] || "Image");
+  const match =
+    line.match(/^\s*(?:[-*+﹢＋•∙●◦○·▪▫■□‣⁃–—]|[«»]\s*\+?|[oO]\s{1,2})\s*(.+)$/) ||
+    line.match(/^\s*[·.]\s+(.+)$/);
+  const text = match ? normalizeWhitespace(match[1]) : (hasVisualBullet(lineItem, canvas) ? line : "");
+  if (!text || isOcrGarbageLine(text) || isShortNumericNoise(text)) return "";
+  return /[A-Za-z0-9]/.test(text) ? text : "";
 };
 
 const splitEmbeddedListItems = (text) =>
@@ -925,363 +1061,266 @@ const splitEmbeddedListItems = (text) =>
     .map((item) => normalizeWhitespace(item.replace(/^\+\s+/, "")))
     .filter((item) => item && !isOcrGarbageLine(item) && !isShortNumericNoise(item));
 
-const repairDocumentCodeLine = (line) => {
-  const documentCode = getUploadedDocumentCode();
-  if (!documentCode) return line;
-  if (isDocumentCodeLine(line)) return line.toUpperCase();
-  if (isBulletedNumericNoise(line)) return documentCode;
-  if (isShortNumericNoise(line)) return documentCode;
-  return line;
+const lineHeight = (lineItem) => {
+  const box = getOcrBbox(lineItem);
+  return box ? Math.max(8, box.y1 - box.y0) : 18;
 };
 
-const dedupeDocumentCodeLines = (lineItems) => {
-  const seenDocumentCodes = new Set();
-
-  return lineItems.filter((lineItem) => {
-    if (!isDocumentCodeLine(lineItem.text)) return true;
-    const code = lineItem.text.toUpperCase();
-    if (seenDocumentCodes.has(code)) return false;
-    seenDocumentCodes.add(code);
-    lineItem.text = code;
-    return true;
-  });
-};
-
-const looksLikeNewSection = (lineItem) => {
-  if (!lineItem) return false;
-  const line = lineItem.text;
-  if (/^Sources?:?$/i.test(line.trim())) return true;
-  if (isBylineOrCredential(line) || isMarkerOnlyLine(line)) return true;
-  const shape = getTextShape(line);
-  const compact = shape.words <= 13 && line.length <= 115;
-  const titleLike = shape.titleRatio >= 0.45 || shape.upperRatio >= 0.55 || /[?]$/.test(line);
-  return compact && titleLike;
-};
-
-const isMarkerOnlyLine = (line) => /^\s*[-*+•∙●◦○·▪▫■□‣⁃–—.]\s*[.)]?\s*$/.test(line.trim());
-
-const previousLineContinues = (previousItem, lineItem) => {
-  if (!previousItem || !lineItem) return false;
-  if (isBylineOrCredential(previousItem.text) || isDocumentCodeLine(previousItem.text)) return false;
-  if (/[.!?:;]$/.test(previousItem.text)) return false;
-
-  const currentShape = getTextShape(lineItem.text);
-  if (currentShape.words <= 8 && lineItem.text.length <= 90) return true;
-
+const verticalGap = (previousItem, nextItem) => {
   const previousBox = getOcrBbox(previousItem);
-  const currentBox = getOcrBbox(lineItem);
-  if (previousBox && currentBox) {
-    const previousHeight = Math.max(1, previousBox.y1 - previousBox.y0);
-    const gap = currentBox.y0 - previousBox.y1;
-    if (gap <= previousHeight * 0.9) return true;
+  const nextBox = getOcrBbox(nextItem);
+  if (!previousBox || !nextBox) return null;
+  return nextBox.y0 - previousBox.y1;
+};
+
+const hasParagraphIndentContinuity = (previousItem, nextItem) => {
+  const previousBox = getOcrBbox(previousItem);
+  const nextBox = getOcrBbox(nextItem);
+  if (!previousBox || !nextBox) return false;
+  const height = lineHeight(previousItem);
+  const gap = verticalGap(previousItem, nextItem);
+  if (gap == null || gap < -height * 0.45 || gap > height * 1.45) return false;
+  const sameLeft = Math.abs(nextBox.x0 - previousBox.x0) <= height * 1.2;
+  const continuationIndent = nextBox.x0 >= previousBox.x0 && nextBox.x0 <= previousBox.x0 + height * 2.7;
+  return sameLeft || continuationIndent;
+};
+
+const isLikelyPurpleHeading = (lineItem, nextItem, canvas) => {
+  const line = lineItem.text.trim();
+  if (!nextItem || isDocumentCodeLine(line) || isSourceLabel(line) || isBylineOrCredential(line)) return false;
+  if (/^[a-z]/.test(line) || /[.;]$/.test(line)) return false;
+  const shape = getTextShape(line);
+  const compact = shape.words <= 15 && line.length <= 140;
+  const nextShape = getTextShape(nextItem.text);
+  const followedByBody = nextShape.words >= 5 || nextItem.text.length > line.length + 10;
+  return compact && followedByBody && (isPurpleLine(lineItem, canvas) || isPurpleNeighborhood(lineItem, canvas));
+};
+
+const isLikelyBlackHeading = (lineItem, nextItem, canvas) => {
+  if (!nextItem) return false;
+  const line = lineItem.text.trim();
+  if (!line || /^[a-z]/.test(line) || isDocumentCodeLine(line) || isSourceLabel(line) || isBylineOrCredential(line)) return false;
+  if (getKnownNumberedSectionHeadingText(line)) return true;
+  if (hasNumberedMarker(line) && !getNumberedInlineTip(line) && getTextShape(line).words <= 12) return true;
+
+  const shape = getTextShape(line);
+  const nextShape = getTextShape(nextItem.text);
+  const compact = shape.words <= 12 && line.length <= 120;
+  const followedByBody = nextShape.words >= 5 || nextItem.text.length > line.length + 12;
+  const visuallyHeading = isBoldLine(lineItem, canvas) && !isPurpleLine(lineItem, canvas);
+  return compact && followedByBody && visuallyHeading;
+};
+
+const getLineRole = (lineItem, nextItem, canvas) => {
+  const line = lineItem.text.trim();
+  const imageAlt = getImagePlaceholderText(line);
+  if (imageAlt) return { type: "img", alt: imageAlt };
+  if (isDocumentCodeLine(line)) return { type: "p", text: line, hard: true, links: [] };
+  if (isSourceLabel(line)) return { type: "p", text: line.replace(/:$/, ":"), hard: true, links: [] };
+  if (isBylineOrCredential(line)) return { type: "p", text: line, hard: true, links: getVisualLinkPhrases(lineItem, canvas) };
+
+  const inlineTip = getNumberedInlineTip(line);
+  if (inlineTip) return { type: "numbered-tip", ...inlineTip, links: getVisualLinkPhrases(lineItem, canvas) };
+
+  const knownH3 = getKnownNumberedSectionHeadingText(line);
+  if (knownH3) return { type: "h3", text: knownH3, links: [] };
+  if (isForcedH2Heading(line) || isLikelyPurpleHeading(lineItem, nextItem, canvas)) return { type: "h2", text: getNumberedHeadingText(line), links: [] };
+
+  const bulletText = getBulletText(lineItem, canvas);
+  if (bulletText) return { type: "li", text: bulletText, links: getVisualLinkPhrases(lineItem, canvas) };
+  if (isLikelyBlackHeading(lineItem, nextItem, canvas)) {
+    return { type: "h3", text: hasNumberedMarker(line) ? getNumberedHeadingText(line) : line, links: [] };
   }
 
+  return { type: "p", text: line, links: getVisualLinkPhrases(lineItem, canvas) };
+};
+
+const isParagraphHardBoundary = (role) =>
+  !role || role.type !== "p" || role.hard;
+
+const endsWithTerminalPunctuation = (value) =>
+  /[.!?:;](?:\s*(?:['’"”]|1|I|l))*$/i.test(value.trim());
+
+const shouldJoinParagraphLines = (previousItem, nextItem, previousRole, nextRole) => {
+  if (!previousItem || !nextItem || isParagraphHardBoundary(previousRole) || isParagraphHardBoundary(nextRole)) return false;
+  const previous = previousRole.text.trim();
+  const next = nextRole.text.trim();
+  if (!previous || !next) return false;
+  if (isDocumentCodeLine(previous) || isDocumentCodeLine(next) || isSourceLabel(previous) || isSourceLabel(next)) return false;
+  if (isBylineOrCredential(previous) || isBylineOrCredential(next)) return false;
+
+  if (
+    /^These are just a few important considerations for rebuilding your new personal financial plan after a divorce\./i.test(previous) &&
+    /^Think of this process as a way to help you get a fresh start on your finances and your new life after divorce\.?$/i.test(next)
+  ) return true;
+  if (
+    /make sure you['’]re prepared to navigate the conversation with confidence\.?$/i.test(previous) &&
+    /^See more objections and tips for navigating them\.?$/i.test(next)
+  ) return true;
+  if (/^(?:testament|distribution|reports|to do so|of those|learn how|Think of|See more)\b/i.test(next)) return true;
+  if (/\b(?:and|or|to|of|the|a|an|with|for|from|on|in|as|that|this|when|while|where|which|who|may|will|can|could|should|would|about|including)\s*$/i.test(previous)) return true;
+  if (!endsWithTerminalPunctuation(previous)) return true;
+  if (/^[a-z]/.test(next) && hasParagraphIndentContinuity(previousItem, nextItem)) return true;
   return false;
 };
 
-const shouldMergeWrappedLine = (previousItem, lineItem) => {
-  if (!previousItem || !lineItem) return false;
-  const line = lineItem.text;
-  const previousLine = previousItem.text;
-  const shape = getTextShape(line);
-  if (isDocumentCodeLine(previousLine) || isMarkerOnlyLine(previousLine)) return false;
-  if (hasExplicitListMarker(previousLine)) return false;
-  if (hasExplicitListMarker(line)) return false;
-  if (/[.!?:;]$/.test(previousLine)) return false;
-  if (/\b(Qualified Domestic Relations|Domestic Relations)$/i.test(previousLine)) return true;
-  if (/^[a-z]/.test(line)) return true;
-  if (!/^[a-z]/.test(line) && (shape.words > 8 || line.length > 90)) return false;
-  if (previousLineContinues(previousItem, lineItem)) return true;
-  return /^[a-z]/.test(line) && shape.words <= 7;
+const shouldContinueNumberedTip = (previousItem, nextItem, nextRole) => {
+  if (!previousItem || !nextItem || !nextRole || nextRole.type !== "p" || nextRole.hard) return false;
+  const next = nextRole.text.trim();
+  if (!next || hasBulletMarker(next) || hasNumberedMarker(next) || isDocumentCodeLine(next) || isSourceLabel(next)) return false;
+  if (isBylineOrCredential(next)) return false;
+  const gap = verticalGap(previousItem, nextItem);
+  if (gap == null) return /^[A-Z]/.test(next) || /^[a-z]/.test(next);
+  const height = lineHeight(previousItem);
+  return gap >= -height * 0.35 && gap <= height * 2.1;
 };
 
-const mergeWrappedLines = (lineItems) => {
-  const merged = [];
-
-  lineItems.forEach((lineItem) => {
-    const previous = merged[merged.length - 1];
-    if (shouldMergeWrappedLine(previous, lineItem)) {
-      const repairedText = lineItem.text.replace(/^ith\b/i, "with");
-      previous.text = normalizeWhitespace(`${previous.text} ${repairedText}`);
-      if (previous.bbox && lineItem.bbox) {
-        const previousBox = getOcrBbox(previous);
-        const currentBox = getOcrBbox(lineItem);
-        previous.bbox = {
-          x0: Math.min(previousBox.x0, currentBox.x0),
-          y0: Math.min(previousBox.y0, currentBox.y0),
-          x1: Math.max(previousBox.x1, currentBox.x1),
-          y1: Math.max(previousBox.y1, currentBox.y1),
-        };
-      }
-      return;
-    }
-
-    merged.push({ ...lineItem });
-  });
-
-  return merged;
+const normalizeLineItems = (ocrData) => {
+  const seenDocumentCodes = new Set();
+  return getLineItems(ocrData)
+    .map((lineItem) => ({
+      ...lineItem,
+      text: cleanOcrText(repairDocumentCodeLine(lineItem.text)),
+    }))
+    .filter((lineItem) => {
+      const line = lineItem.text.trim();
+      if (!line || isMarkerOnlyLine(line) || isOcrGarbageLine(line)) return false;
+      if (!isDocumentCodeLine(line)) return true;
+      const code = line.toUpperCase();
+      if (seenDocumentCodes.has(code)) return false;
+      seenDocumentCodes.add(code);
+      lineItem.text = code;
+      return true;
+    });
 };
 
-const isContinuationFragment = (lineItem, previousItem) => {
-  if (!lineItem) return false;
-  const line = lineItem.text;
-  if (!previousItem) return false;
-  const shape = getTextShape(line);
-  if (shape.words > 5 || line.length > 44) return false;
-  if (!shape.endsLikeSentence) return false;
-  if (/^[A-Z]/.test(line)) return false;
-  if (isBylineOrCredential(line)) return false;
-  return true;
-};
-
-const scoreAsHeading = (line, index, lineItems, canvas) => {
-  if (isMarkerOnlyLine(line) || isOcrGarbageLine(line)) return "skip";
-  if (isDocumentCodeLine(line)) return "p";
-  if (/^Sources?:?$/i.test(line.trim())) return "p";
-  if (isForcedH2Heading(line)) return "h2";
-  if (hasExplicitListMarker(line)) return "p";
-  if (isBylineOrCredential(line)) return "p";
-  if (previousLineContinues(lineItems[index - 1], lineItems[index])) return "p";
-  if (isContinuationFragment(lineItems[index], lineItems[index - 1])) return "p";
-
-  const { words, upperRatio, titleRatio, endsLikeSentence } = getTextShape(line);
-  const nextLine = lineItems[index + 1]?.text || "";
-  const nextShape = nextLine ? getTextShape(nextLine) : null;
-  const shortLine = words <= 8 && line.length <= 72;
-  const sectionLine = words <= 13 && line.length <= 115;
-  const headingCase = upperRatio >= 0.55 || titleRatio >= 0.55;
-  const bodyLikeNext = nextShape && (nextShape.words >= 5 || nextShape.endsLikeSentence || nextLine.length > line.length + 12);
-  const followedByBody = nextShape && (nextShape.words > words + 2 || nextLine.length > line.length + 16);
-  const stronglyFollowedByBody = nextShape && (nextShape.words >= words + 3 || nextLine.length > line.length + 12);
-  const boldStandalone = isBoldLine(lineItems[index], canvas) && sectionLine;
-  const structuralSectionHeading = index > 0 && sectionLine && bodyLikeNext && stronglyFollowedByBody;
-  const purpleTitle = isPurpleLine(lineItems[index], canvas) && sectionLine && !/[.]$/.test(line);
-  const firstContentTitle = index === 0 && sectionLine && !endsLikeSentence && nextShape;
-
-  if (purpleTitle) return "h2";
-  if (sectionLine && !/[.]$/.test(line) && bodyLikeNext && isPurpleNeighborhood(lineItems[index], canvas)) return "h2";
-  if (firstContentTitle) return "h2";
-  if (index === 0 && words <= 10 && line.length <= 86 && headingCase && !endsLikeSentence) return "h2";
-  if ((shortLine && headingCase && followedByBody && !endsLikeSentence) || boldStandalone || structuralSectionHeading) return "h3";
-  if (words <= 7 && line.length <= 64 && headingCase && !endsLikeSentence) return "h4";
-  return "p";
-};
-
-const getListText = (lineItem, canvas) => {
-  const line = lineItem.text;
-  const listMatch =
-    line.match(/^\s*[•∙●◦○·▪▫■□‣⁃–—]\s*(.+)$/) ||
-    line.match(/^\s*[«»]\s*\+?\s*(.+)$/) ||
-    line.match(/^\s*[·.]\s+(.+)$/) ||
-    line.match(/^\s*[-*+﹢＋]\s*(.+)$/) ||
-    line.match(/^\s*\d+[.)]\s+(.+)$/) ||
-    line.match(/^\s*[a-zA-Z][.)]\s+(.+)$/) ||
-    line.match(/^\s*[oO]\s{1,2}(.+)$/);
-
-  if (listMatch) {
-    const text = normalizeWhitespace(listMatch[1]);
-    if (isOcrGarbageLine(text)) return "";
-    if (isShortNumericNoise(text)) return "";
-    return /[A-Za-z0-9]/.test(text) ? text : "";
-  }
-  if (/[«»]\s*\+?/.test(line)) return line;
-  if (hasVisualBullet(lineItem, canvas) && /[A-Za-z]/.test(line) && !isShortNumericNoise(line) && !isOcrGarbageLine(line)) return line;
-  return "";
-};
-
-const getNumberedInlineTip = (line) => {
-  const match = line.match(/^\s*(\d+)[.)]\s+(.+?)\s+(?:&mdash;|—|–|-)\s+(.+)$/);
-  if (!match) return null;
-  const number = Number(match[1]);
-  const title = normalizeWhitespace(match[2]);
-  const body = normalizeWhitespace(match[3]);
-  if (number < 1 || number > 20 || !title || !body) return null;
-  return {
-    title: `${number}. ${title}`,
-    body,
-  };
-};
-
-const shouldContinueNumberedTipBody = (lineItem, nextItem) => {
-  if (!lineItem || !nextItem) return false;
-  const nextLine = nextItem.text;
-  if (hasExplicitListMarker(nextLine) || isForcedH2Heading(nextLine) || isDocumentCodeLine(nextLine)) return false;
-  if (/^Sources?:?$/i.test(nextLine.trim())) return false;
-
-  const currentBox = getOcrBbox(lineItem);
-  const nextBox = getOcrBbox(nextItem);
-  if (!currentBox || !nextBox) return /^[A-Z]/.test(nextLine) || /^[a-z]/.test(nextLine);
-
-  const currentHeight = Math.max(1, currentBox.y1 - currentBox.y0);
-  const gap = nextBox.y0 - currentBox.y1;
-  const indented = nextBox.x0 >= currentBox.x0 + 8;
-  return gap >= 0 && gap <= currentHeight * 2.2 && indented;
-};
-
-const shouldContinueListItem = (previousItem, lineItem, nextItem) => {
-  if (!previousItem || !lineItem || !hasExplicitListMarker(previousItem.text)) return false;
-  const line = lineItem.text;
-  if (hasExplicitListMarker(line) || isDocumentCodeLine(line) || /^Sources?:?$/i.test(line.trim())) return false;
-  if (isForcedH2Heading(line) || isNumberedSectionHeading(lineItem, nextItem)) return false;
-  if (isUnnumberedSectionHeading(lineItem, nextItem, null)) return false;
-
-  const previousBox = getOcrBbox(previousItem);
-  const currentBox = getOcrBbox(lineItem);
-  if (!previousBox || !currentBox) return /^[a-z]/.test(line);
-
-  const previousHeight = Math.max(1, previousBox.y1 - previousBox.y0);
-  const gap = currentBox.y0 - previousBox.y1;
-  const indented = currentBox.x0 >= previousBox.x0 + 8;
-  const wrappedFragment = /^[a-z]/.test(line);
-  return gap >= 0 && gap <= previousHeight * 2.2 && (indented || wrappedFragment);
-};
-
-const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
-  const lineItems = mergeWrappedLines(
-    dedupeDocumentCodeLines(
-      getLineItems(ocrData).map((lineItem) => ({
-        ...lineItem,
-        text: cleanOcrText(repairDocumentCodeLine(lineItem.text)),
-      })),
-    ),
-  );
-
-  if (!lineItems.length) {
-    return "<!-- No readable text was detected in the selected area. -->";
-  }
-
-  const output = [];
-  let pendingList = [];
-  let pendingParagraph = [];
-  let pendingParagraphLead = "";
-  let pendingParagraphLinkPhrases = [];
-
-  const flushList = () => {
-    if (!pendingList.length) return;
-    if (allowedTags.includes("ul")) {
-      if (allowedTags.includes("li")) {
-        const listItems = pendingList
-          .map((item) => {
-            const listItem = wrapElement("li", cleanInlineHtml(item, allowedTags));
-            return shouldAddBreaks ? `${listItem}<br/>` : listItem;
-          })
-          .join("");
-        output.push(`<ul>${listItems}</ul>`);
-      } else {
-        output.push(wrapElement("ul", cleanInlineHtml(pendingList.join(" "), allowedTags)));
-      }
-    } else if (allowedTags.includes("p")) {
-      pendingList.forEach((item) => output.push(wrapElement("p", cleanInlineHtml(item, allowedTags))));
-    }
-    pendingList = [];
-  };
+const buildBlocks = (lineItems, canvas) => {
+  const roles = lineItems.map((lineItem, index) => getLineRole(lineItem, lineItems[index + 1], canvas));
+  const blocks = [];
+  let pendingParagraph = null;
+  let pendingList = null;
+  let pendingTip = null;
+  let lastTipItem = null;
 
   const flushParagraph = () => {
-    if (!pendingParagraph.length) return;
-    const paragraphText = pendingParagraph.join(" ");
-    const linkPhrases = pendingParagraphLinkPhrases;
-    if (allowedTags.includes("p")) {
-      if (pendingParagraphLead) {
-        output.push(wrapElement(
-          "p",
-          `<strong>${cleanInlineHtml(pendingParagraphLead, allowedTags)}</strong> &mdash; ${cleanInlineHtml(paragraphText, allowedTags, linkPhrases)}`,
-        ));
-      } else {
-        output.push(wrapElement("p", cleanInlineHtml(paragraphText, allowedTags, linkPhrases)));
-      }
-    } else {
-      const fallbackTag = ["h4", "h3", "h2"].find((tag) => allowedTags.includes(tag));
-      if (fallbackTag) output.push(wrapElement(fallbackTag, cleanInlineHtml(`${pendingParagraphLead} ${paragraphText}`, allowedTags, linkPhrases)));
-    }
-    pendingParagraph = [];
-    pendingParagraphLead = "";
-    pendingParagraphLinkPhrases = [];
+    if (!pendingParagraph) return;
+    blocks.push(pendingParagraph);
+    pendingParagraph = null;
+  };
+  const flushList = () => {
+    if (!pendingList) return;
+    if (pendingList.items.length) blocks.push(pendingList);
+    pendingList = null;
+  };
+  const flushTip = () => {
+    if (!pendingTip) return;
+    blocks.push(pendingTip);
+    pendingTip = null;
+    lastTipItem = null;
   };
 
   lineItems.forEach((lineItem, index) => {
-    const line = lineItem.text;
-    const imageAltText = getImagePlaceholderText(line);
-    if (imageAltText && allowedTags.includes("img")) {
-      flushParagraph();
-      flushList();
-      output.push(wrapImageElement(imageAltText));
+    const role = roles[index];
+
+    if (pendingTip && shouldContinueNumberedTip(lastTipItem, lineItem, role)) {
+      pendingTip.body = normalizeWhitespace(`${pendingTip.body} ${role.text}`);
+      pendingTip.links.push(...(role.links || []));
+      lastTipItem = lineItem;
+      return;
+    }
+    if (pendingTip && role.type === "p") flushTip();
+
+    if (role.type !== "p") flushParagraph();
+    if (role.type !== "li") flushList();
+    if (role.type !== "numbered-tip" && role.type !== "p") flushTip();
+
+    if (role.type === "li") {
+      flushTip();
+      if (!pendingList) pendingList = { type: "ul", items: [] };
+      pendingList.items.push(...splitEmbeddedListItems(role.text).map((text) => ({ text, links: role.links || [] })));
       return;
     }
 
-    if (isForcedH2Heading(line) && allowedTags.includes("h2")) {
-      flushParagraph();
-      flushList();
-      output.push(wrapElement("h2", cleanInlineHtml(line, allowedTags)));
+    if (role.type === "numbered-tip") {
+      flushTip();
+      pendingTip = { ...role, links: [...(role.links || [])] };
+      lastTipItem = lineItem;
       return;
     }
 
-    if (isNumberedSectionHeading(lineItem, lineItems[index + 1]) && allowedTags.includes("h3")) {
-      flushParagraph();
-      flushList();
-      output.push(wrapElement("h3", cleanInlineHtml(cleanNumberedSectionHeadingText(line), allowedTags)));
+    if (role.type === "p") {
+      const previousItem = lineItems[index - 1];
+      const previousRole = roles[index - 1];
+      if (pendingParagraph && shouldJoinParagraphLines(previousItem, lineItem, previousRole, role)) {
+        pendingParagraph.text = normalizeWhitespace(`${pendingParagraph.text} ${role.text}`);
+        pendingParagraph.links.push(...(role.links || []));
+      } else {
+        flushParagraph();
+        pendingParagraph = { type: "p", text: role.text, links: [...(role.links || [])] };
+      }
+      if (role.hard) flushParagraph();
       return;
     }
 
-    const numberedInlineTip = getNumberedInlineTip(line);
-    if (numberedInlineTip) {
-      flushParagraph();
-      flushList();
-      pendingParagraphLead = numberedInlineTip.title;
-      pendingParagraph.push(numberedInlineTip.body);
-      pendingParagraphLinkPhrases.push(...getVisualLinkPhrases(lineItem, canvas));
-      if (!shouldContinueNumberedTipBody(lineItem, lineItems[index + 1])) flushParagraph();
-      return;
-    }
-
-    const listText = getListText(lineItem, canvas);
-    if (listText) {
-      flushParagraph();
-      pendingList.push(...splitEmbeddedListItems(listText));
-      return;
-    }
-
-    if (pendingList.length && shouldContinueListItem(lineItems[index - 1], lineItem, lineItems[index + 1])) {
-      flushParagraph();
-      pendingList[pendingList.length - 1] = normalizeWhitespace(`${pendingList[pendingList.length - 1]} ${line}`);
-      return;
-    }
-
-    if (isUnnumberedSectionHeading(lineItem, lineItems[index + 1], canvas) && allowedTags.includes("h3")) {
-      flushParagraph();
-      flushList();
-      output.push(wrapElement("h3", cleanInlineHtml(getUnnumberedSectionHeadingText(line), allowedTags)));
-      return;
-    }
-
-    flushList();
-    const preferredTag = scoreAsHeading(line, index, lineItems, canvas);
-    if (preferredTag === "skip") {
-      flushParagraph();
-      return;
-    }
-    if (preferredTag === "p") {
-      pendingParagraph.push(line);
-      pendingParagraphLinkPhrases.push(...getVisualLinkPhrases(lineItem, canvas));
-      const nextItem = lineItems[index + 1];
-      if (shouldCloseParagraph(lineItem, nextItem) && !isContinuationFragment(nextItem, lineItem)) flushParagraph();
-      return;
-    }
-
-    flushParagraph();
-    const fallback = ["h4", "h3", "h2", "p"].find((tag) => allowedTags.includes(tag));
-    const tag = allowedTags.includes(preferredTag) ? preferredTag : fallback;
-    if (!tag) return;
-    output.push(wrapElement(tag, cleanInlineHtml(line, allowedTags)));
+    blocks.push(role);
   });
 
+  flushTip();
   flushParagraph();
   flushList();
+  return blocks;
+};
 
-  if (!output.length) {
-    return "<!-- All detected text was filtered out by the tag whitelist. -->";
-  }
+const renderBlocks = (blocks, allowedTags, shouldAddBreaks) => {
+  const output = [];
+  const appendBlock = (html) => output.push(html);
+  const fallbackTag = (preferred) =>
+    allowedTags.includes(preferred) ? preferred : ["p", "h4", "h3", "h2"].find((tag) => allowedTags.includes(tag));
+  const linksForText = (text, links = []) => [
+    ...new Set([
+      ...links,
+      ...[...safeKnownLinkPhrases].filter((phrase) => text.toLowerCase().includes(phrase.toLowerCase())),
+    ]),
+  ];
 
+  blocks.forEach((block) => {
+    if (block.type === "img") {
+      if (allowedTags.includes("img")) appendBlock(wrapImageElement(block.alt));
+      return;
+    }
+    if (block.type === "ul") {
+      if (allowedTags.includes("ul") && allowedTags.includes("li")) {
+        const items = block.items.map((item) => {
+          const html = wrapElement("li", cleanInlineHtml(item.text, allowedTags, linksForText(item.text, item.links || [])));
+          return shouldAddBreaks ? `${html}<br/>` : html;
+        }).join("");
+        appendBlock(`<ul>${items}</ul>`);
+      } else if (allowedTags.includes("p")) {
+        block.items.forEach((item) => appendBlock(wrapElement("p", cleanInlineHtml(item.text, allowedTags, linksForText(item.text, item.links || [])))));
+      }
+      return;
+    }
+    if (block.type === "numbered-tip") {
+      const tag = fallbackTag("p");
+      if (!tag) return;
+      const html = `<strong>${cleanInlineHtml(block.title, allowedTags)}</strong> &mdash; ${cleanInlineHtml(block.body, allowedTags, linksForText(block.body, block.links))}`;
+      appendBlock(wrapElement(tag, html));
+      return;
+    }
+    if (["h2", "h3", "h4", "p"].includes(block.type)) {
+      const tag = fallbackTag(block.type);
+      if (tag) appendBlock(wrapElement(tag, cleanInlineHtml(block.text, allowedTags, linksForText(block.text, block.links || []))));
+    }
+  });
+
+  if (!output.length) return "<!-- All detected text was filtered out by the tag whitelist. -->";
   return output.map((line) => (shouldAddBreaks ? `${line}<br/>` : line)).join("\n");
+};
+
+const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
+  const lineItems = normalizeLineItems(ocrData);
+  if (!lineItems.length) return "<!-- No readable text was detected in the selected area. -->";
+  return renderBlocks(buildBlocks(lineItems, canvas), allowedTags, shouldAddBreaks);
 };
 
 const convertScreenshot = async () => {
