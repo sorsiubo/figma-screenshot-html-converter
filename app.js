@@ -136,9 +136,13 @@ const cleanOcrText = (value) =>
   value
     .replace(/\bAnew\b/g, "A new")
     .replace(/\bAdivorce\b/g, "A divorce")
+    .replace(/^id your client\b/i, "Did your client")
+    .replace(/\bnew survey\s*Opens in a new tab\b/gi, "new survey")
+    .replace(/\b([A-Za-z][A-Za-z\s-]{2,80}?)\s*Opens in a new tab\b/g, "$1")
     .replace(/\bDiscover which it best\b/gi, "Discover which is best")
     .replace(/customers\s*[’']\s+needs\.\s*['’]?\s*\.?/gi, "customers’ needs.")
     .replace(/\balist\b/gi, "a list")
+    .replace(/\bsawvier\b/gi, "savvier")
     .replace(/\bcan difficult\b/gi, "can be difficult")
     .replace(/\bsoon to be\b/gi, "soon-to-be");
 
@@ -584,6 +588,8 @@ const knownVisualLinkPhrases = [
   "Download the Life Made Simple guide",
   "visit our Resources for you section of the site",
   "post-divorce finances",
+  "new survey",
+  "compound interest calculator",
   "estate planning",
 ];
 
@@ -600,6 +606,8 @@ const safeKnownLinkPhrases = new Set([
   "Download the Life Made Simple guide",
   "visit our Resources for you section of the site",
   "post-divorce finances",
+  "new survey",
+  "compound interest calculator",
 ]);
 
 const isPhraseVisuallyPurple = (lineItem, phrase, canvas) => {
@@ -660,7 +668,8 @@ const hasVisualBullet = (line, canvas) => {
   const height = Math.max(8, bbox.y1 - bbox.y0);
   const markerSize = Math.min(18, Math.max(8, height * 0.9));
   const markerY = bbox.y0 + height * 0.5 - markerSize * 0.5;
-  const outsideMarker = hasSmallMarker(canvas, {
+  const hasRoomForOutsideMarker = bbox.x0 > markerSize * 2.2;
+  const outsideMarker = hasRoomForOutsideMarker && hasSmallMarker(canvas, {
     x: bbox.x0 - markerSize * 2.4,
     y: markerY,
     width: markerSize * 1.8,
@@ -1126,11 +1135,11 @@ const getLineRole = (lineItem, nextItem, canvas) => {
   if (knownH3) return { type: "h3", text: knownH3, links: [] };
   if (isForcedH2Heading(line) || isLikelyPurpleHeading(lineItem, nextItem, canvas)) return { type: "h2", text: getNumberedHeadingText(line), links: [] };
 
-  const bulletText = getBulletText(lineItem, canvas);
-  if (bulletText) return { type: "li", text: bulletText, links: getVisualLinkPhrases(lineItem, canvas) };
   if (isLikelyBlackHeading(lineItem, nextItem, canvas)) {
     return { type: "h3", text: hasNumberedMarker(line) ? getNumberedHeadingText(line) : line, links: [] };
   }
+  const bulletText = getBulletText(lineItem, canvas);
+  if (bulletText) return { type: "li", text: bulletText, links: getVisualLinkPhrases(lineItem, canvas) };
 
   return { type: "p", text: line, links: getVisualLinkPhrases(lineItem, canvas) };
 };
@@ -1162,6 +1171,21 @@ const shouldJoinParagraphLines = (previousItem, nextItem, previousRole, nextRole
   if (!endsWithTerminalPunctuation(previous)) return true;
   if (/^[a-z]/.test(next) && hasParagraphIndentContinuity(previousItem, nextItem)) return true;
   return false;
+};
+
+const shouldContinueWrappedParagraph = (pendingParagraph, previousItem, nextItem, previousRole, nextRole) => {
+  if (!pendingParagraph || pendingParagraph.lineCount < 2) return false;
+  if (!previousItem || !nextItem || isParagraphHardBoundary(previousRole) || isParagraphHardBoundary(nextRole)) return false;
+  if (!endsWithTerminalPunctuation(previousRole.text)) return false;
+  if (!hasParagraphIndentContinuity(previousItem, nextItem)) return false;
+  const previousBox = getOcrBbox(previousItem);
+  const nextBox = getOcrBbox(nextItem);
+  if (!previousBox || !nextBox) return false;
+  const height = lineHeight(previousItem);
+  const gap = verticalGap(previousItem, nextItem);
+  const previousLineWasWide = previousBox.x1 - previousBox.x0 >= height * 28;
+  const paragraphIsAlreadyWrapped = pendingParagraph.lineCount >= 3;
+  return gap != null && gap >= 0 && gap <= height * 1.2 && (previousLineWasWide || paragraphIsAlreadyWrapped);
 };
 
 const shouldContinueNumberedTip = (previousItem, nextItem, nextRole) => {
@@ -1196,6 +1220,18 @@ const normalizeLineItems = (ocrData) => {
 
 const buildBlocks = (lineItems, canvas) => {
   const roles = lineItems.map((lineItem, index) => getLineRole(lineItem, lineItems[index + 1], canvas));
+  roles.forEach((role, index) => {
+    const previousRole = roles[index - 1];
+    if (
+      index > 0 &&
+      ["h2", "h3", "h4"].includes(role.type) &&
+      previousRole?.type === "p" &&
+      !previousRole.hard &&
+      !endsWithTerminalPunctuation(previousRole.text)
+    ) {
+      roles[index] = { type: "p", text: role.text, links: role.links || [] };
+    }
+  });
   const blocks = [];
   let pendingParagraph = null;
   let pendingList = null;
@@ -1251,12 +1287,19 @@ const buildBlocks = (lineItems, canvas) => {
     if (role.type === "p") {
       const previousItem = lineItems[index - 1];
       const previousRole = roles[index - 1];
-      if (pendingParagraph && shouldJoinParagraphLines(previousItem, lineItem, previousRole, role)) {
+      if (
+        pendingParagraph &&
+        (
+          shouldJoinParagraphLines(previousItem, lineItem, previousRole, role) ||
+          shouldContinueWrappedParagraph(pendingParagraph, previousItem, lineItem, previousRole, role)
+        )
+      ) {
         pendingParagraph.text = normalizeWhitespace(`${pendingParagraph.text} ${role.text}`);
         pendingParagraph.links.push(...(role.links || []));
+        pendingParagraph.lineCount += 1;
       } else {
         flushParagraph();
-        pendingParagraph = { type: "p", text: role.text, links: [...(role.links || [])] };
+        pendingParagraph = { type: "p", text: role.text, links: [...(role.links || [])], lineCount: 1 };
       }
       if (role.hard) flushParagraph();
       return;
