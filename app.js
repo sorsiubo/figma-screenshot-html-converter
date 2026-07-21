@@ -76,8 +76,8 @@ const cleanHtmlText = (value) => encodeSpecialCharacters(escapeHtml(value));
 const cleanHtmlTextWithSuperscripts = (value) =>
   cleanHtmlText(value)
     .replace(/^&#39;\s+/g, "<sup>1</sup> ")
-    .replace(/([?.!])(?:&rsquo;|&#39;|&quot;)(?=\s|$)/g, "$1<sup>1</sup>")
-    .replace(/([?.!])(?:&rsquo;|&#39;|&quot;)\s*$/g, "$1<sup>1</sup>")
+    .replace(/([?])(?:&rsquo;|&#39;|&quot;)(?=\s|$)/g, "$1<sup>1</sup>")
+    .replace(/([?])(?:&rsquo;|&#39;|&quot;)\s*$/g, "$1<sup>1</sup>")
     .replace(/([?.!])(?:\s*)(?:1|I|l)\s*$/g, "$1<sup>1</sup>");
 
 const getHref = (value) => {
@@ -107,12 +107,29 @@ const appendLinkedPhrases = (value, allowedTags, linkPhrases = []) => {
 };
 
 const cleanInlineHtml = (value, allowedTags, linkPhrases = []) => {
-  const linkPattern = /\b((?:https?:\/\/)?(?:www\.)?(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:\/[^\s<]*)?)(?=[\s).,;:!?]|$)/g;
+  const emailPattern = /\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?=[\s).,;:!?]|$)/g;
+  const linkPattern = /(?<!@)\b((?:https?:\/\/)?(?:www\.)?(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:\/[^\s<]*)?)(?=[\s).,;:!?]|$)/g;
+
+  const linkEmails = (chunk) => {
+    let emailOutput = "";
+    let emailLastIndex = 0;
+    chunk.replace(emailPattern, (match, email, offset) => {
+      emailOutput += appendLinkedPhrases(chunk.slice(emailLastIndex, offset), allowedTags, linkPhrases);
+      emailOutput += allowedTags.includes("a")
+        ? `<a href="#">${cleanHtmlText(email)}</a>`
+        : cleanHtmlText(email);
+      emailLastIndex = offset + match.length;
+      return match;
+    });
+    emailOutput += appendLinkedPhrases(chunk.slice(emailLastIndex), allowedTags, linkPhrases);
+    return emailOutput;
+  };
+
   let output = "";
   let lastIndex = 0;
 
   value.replace(linkPattern, (match, url, offset) => {
-    output += appendLinkedPhrases(value.slice(lastIndex, offset), allowedTags, linkPhrases);
+    output += linkEmails(value.slice(lastIndex, offset));
     const trailing = match.match(/[).,;:!?]+$/)?.[0] || "";
     const linkText = trailing ? match.slice(0, -trailing.length) : match;
     if (allowedTags.includes("a") && linkText.includes(".")) {
@@ -126,17 +143,31 @@ const cleanInlineHtml = (value, allowedTags, linkPhrases = []) => {
     return match;
   });
 
-  output += appendLinkedPhrases(value.slice(lastIndex), allowedTags, linkPhrases);
+  output += linkEmails(value.slice(lastIndex));
   return output;
 };
 
 const normalizeWhitespace = (value) => value.replace(/\s+/g, " ").trim();
 
+const restoreMissingLeadingQuote = (value) => {
+  const text = normalizeWhitespace(value);
+  if (
+    /^[A-Z]/.test(text) &&
+    !/^[“"]/.test(text) &&
+    /[,”"]\s+said\s+[A-Z][^“”"]{2,180}\.\s+[“"][A-Z]/.test(text)
+  ) {
+    return `“${text}`;
+  }
+  return text;
+};
+
 const cleanOcrText = (value) =>
-  value
+  restoreMissingLeadingQuote(value
     .replace(/\bAnew\b/g, "A new")
     .replace(/\bAdivorce\b/g, "A divorce")
     .replace(/^id your client\b/i, "Did your client")
+    .replace(/\bForbes[\"“”]\s+2025\b/g, "Forbes' 2025")
+    .replace(/\bteammates success\b/gi, "teammate's success")
     .replace(/\bnew survey\s*Opens in a new tab\b/gi, "new survey")
     .replace(/\b([A-Za-z][A-Za-z\s-]{2,80}?)\s*Opens in a new tab\b/g, "$1")
     .replace(/\bDiscover which it best\b/gi, "Discover which is best")
@@ -144,7 +175,7 @@ const cleanOcrText = (value) =>
     .replace(/\balist\b/gi, "a list")
     .replace(/\bsawvier\b/gi, "savvier")
     .replace(/\bcan difficult\b/gi, "can be difficult")
-    .replace(/\bsoon to be\b/gi, "soon-to-be");
+    .replace(/\bsoon to be\b/gi, "soon-to-be"));
 
 const highlightHtml = (value) => {
   const escaped = escapeHtml(value);
@@ -590,6 +621,11 @@ const knownVisualLinkPhrases = [
   "post-divorce finances",
   "new survey",
   "compound interest calculator",
+  "Protective Life Corporation",
+  "Protective Corporation",
+  "Dai-ichi Life Holdings, Inc.",
+  "Great Place to Work",
+  "Forbes' 2025 List of America's Best Midsize Employers",
   "estate planning",
 ];
 
@@ -966,6 +1002,10 @@ const getUploadedDocumentCode = () => {
 
 const isDocumentCodeLine = (line) => /^WEB\.\d+(?:\.\d+)*$/i.test(line.trim());
 const isSourceLabel = (line) => /^Sources?:?$/i.test(line.trim());
+const isSourceLine = (line) => /^Sources?:\s+\S+/i.test(line.trim());
+const isEmailLine = (line) => /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/i.test(line.trim());
+const isStandaloneUrlLine = (line) => /^(?:https?:\/\/|www\.)(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:\/[^\s<]*)?\.?$/i.test(line.trim());
+const isPressReleaseDateline = (line) => /^[A-Z][A-Z\s.-]+,\s+[A-Z][A-Za-z.]+\.?--\(?BUSINESS WIRE\)?--/i.test(line.trim());
 
 const isShortNumericNoise = (line) => /^[0oO]{1,4}$/.test(line.trim()) || /^\d{1,2}$/.test(line.trim());
 
@@ -1005,7 +1045,8 @@ const isBylineOrCredential = (line) => {
   if (!compact) return false;
   const credentialPattern = /\b(CLU|ChFC|CFP|CPA|CFA|MBA|PhD|JD|MD|Esq)\b|&reg;|®/;
   const jobTitlePattern = /\b(VP|CEO|CFO|COO|Head of|Director|Manager|President|Officer|Distribution|Sales|Marketing)\b/;
-  const hasNameComma = /^[A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+,/.test(line);
+  const organizationPhrase = /\b(Agency|Corporation|Company|Group|Holdings|Securities|Services|Partners|LLC|Inc|LP|LLP|Bank|Insurance)\b/;
+  const hasNameComma = !organizationPhrase.test(line) && /^[A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+,/.test(line);
   return credentialPattern.test(line) || jobTitlePattern.test(line) || hasNameComma;
 };
 
@@ -1017,6 +1058,12 @@ const forcedH2Headings = new Set([
   "1. make a whole new will",
   "2. make a codicil to your will",
   "3. alter your existing will",
+  "about protective asset protection",
+  "about protective",
+  "about cetera",
+  "about simplicity group",
+  "about resolution life",
+  "media contact",
 ]);
 
 const isForcedH2Heading = (line) => forcedH2Headings.has(line.trim().toLowerCase());
@@ -1125,11 +1172,17 @@ const getLineRole = (lineItem, nextItem, canvas) => {
   const imageAlt = getImagePlaceholderText(line);
   if (imageAlt) return { type: "img", alt: imageAlt };
   if (isDocumentCodeLine(line)) return { type: "p", text: line, hard: true, links: [] };
+  if (isSourceLine(line)) return { type: "p", text: line, hard: true, links: getVisualLinkPhrases(lineItem, canvas) };
+  if (isEmailLine(line)) return { type: "p", text: line, hard: true, links: getVisualLinkPhrases(lineItem, canvas) };
+  if (isStandaloneUrlLine(line)) return { type: "p", text: line.replace(/\.$/, ""), hard: true, links: getVisualLinkPhrases(lineItem, canvas) };
   if (isSourceLabel(line)) return { type: "p", text: line.replace(/:$/, ":"), hard: true, links: [] };
   if (isBylineOrCredential(line)) return { type: "p", text: line, hard: true, links: getVisualLinkPhrases(lineItem, canvas) };
 
   const inlineTip = getNumberedInlineTip(line);
   if (inlineTip) return { type: "numbered-tip", ...inlineTip, links: getVisualLinkPhrases(lineItem, canvas) };
+
+  const bulletText = getBulletText(lineItem, canvas);
+  if (bulletText && hasBulletMarker(line)) return { type: "li", text: bulletText, links: getVisualLinkPhrases(lineItem, canvas) };
 
   const knownH3 = getKnownNumberedSectionHeadingText(line);
   if (knownH3) return { type: "h3", text: knownH3, links: [] };
@@ -1138,7 +1191,6 @@ const getLineRole = (lineItem, nextItem, canvas) => {
   if (isLikelyBlackHeading(lineItem, nextItem, canvas)) {
     return { type: "h3", text: hasNumberedMarker(line) ? getNumberedHeadingText(line) : line, links: [] };
   }
-  const bulletText = getBulletText(lineItem, canvas);
   if (bulletText) return { type: "li", text: bulletText, links: getVisualLinkPhrases(lineItem, canvas) };
 
   return { type: "p", text: line, links: getVisualLinkPhrases(lineItem, canvas) };
@@ -1155,7 +1207,19 @@ const shouldJoinParagraphLines = (previousItem, nextItem, previousRole, nextRole
   const previous = previousRole.text.trim();
   const next = nextRole.text.trim();
   if (!previous || !next) return false;
-  if (isDocumentCodeLine(previous) || isDocumentCodeLine(next) || isSourceLabel(previous) || isSourceLabel(next)) return false;
+  if (
+    isDocumentCodeLine(previous) ||
+    isDocumentCodeLine(next) ||
+    isSourceLabel(previous) ||
+    isSourceLabel(next) ||
+    isSourceLine(previous) ||
+    isSourceLine(next) ||
+    isEmailLine(previous) ||
+    isEmailLine(next) ||
+    isStandaloneUrlLine(previous) ||
+    isStandaloneUrlLine(next) ||
+    isPressReleaseDateline(next)
+  ) return false;
   if (isBylineOrCredential(previous) || isBylineOrCredential(next)) return false;
 
   if (
@@ -1165,6 +1229,10 @@ const shouldJoinParagraphLines = (previousItem, nextItem, previousRole, nextRole
   if (
     /make sure you['’]re prepared to navigate the conversation with confidence\.?$/i.test(previous) &&
     /^See more objections and tips for navigating them\.?$/i.test(next)
+  ) return true;
+  if (
+    /affiliated independent financial professionals and their teams\.?$/i.test(previous) &&
+    /^The acquisition brings\b/i.test(next)
   ) return true;
   if (/^(?:testament|distribution|reports|to do so|of those|learn how|Think of|See more)\b/i.test(next)) return true;
   if (/\b(?:and|or|to|of|the|a|an|with|for|from|on|in|as|that|this|when|while|where|which|who|may|will|can|could|should|would|about|including)\s*$/i.test(previous)) return true;
@@ -1225,11 +1293,30 @@ const buildBlocks = (lineItems, canvas) => {
     if (
       index > 0 &&
       ["h2", "h3", "h4"].includes(role.type) &&
+      !isForcedH2Heading(role.text) &&
       previousRole?.type === "p" &&
       !previousRole.hard &&
       !endsWithTerminalPunctuation(previousRole.text)
     ) {
       roles[index] = { type: "p", text: role.text, links: role.links || [] };
+    }
+  });
+  roles.forEach((role, index) => {
+    if (!isPressReleaseDateline(lineItems[index]?.text || "")) return;
+
+    let cursor = index - 1;
+    while (cursor >= 0) {
+      const role = roles[cursor];
+      if (!role || role.hard || !["p", "h2", "h3", "h4"].includes(role.type)) break;
+      if (isPressReleaseDateline(lineItems[cursor]?.text || "")) break;
+      if (cursor < index - 1) {
+        const gapToNext = verticalGap(lineItems[cursor], lineItems[cursor + 1]);
+        const height = lineHeight(lineItems[cursor]);
+        const shortDeckLine = getTextShape(role.text).words <= 14 && role.text.length <= 120;
+        if (gapToNext != null && gapToNext > height * 1.8 && !shortDeckLine) break;
+      }
+      roles[cursor] = { type: "p", text: role.text, links: role.links || [], italic: true };
+      cursor -= 1;
     }
   });
   const blocks = [];
@@ -1296,10 +1383,11 @@ const buildBlocks = (lineItems, canvas) => {
       ) {
         pendingParagraph.text = normalizeWhitespace(`${pendingParagraph.text} ${role.text}`);
         pendingParagraph.links.push(...(role.links || []));
+        pendingParagraph.italic = pendingParagraph.italic || Boolean(role.italic);
         pendingParagraph.lineCount += 1;
       } else {
         flushParagraph();
-        pendingParagraph = { type: "p", text: role.text, links: [...(role.links || [])], lineCount: 1 };
+        pendingParagraph = { type: "p", text: role.text, links: [...(role.links || [])], lineCount: 1, italic: Boolean(role.italic) };
       }
       if (role.hard) flushParagraph();
       return;
@@ -1352,7 +1440,11 @@ const renderBlocks = (blocks, allowedTags, shouldAddBreaks) => {
     }
     if (["h2", "h3", "h4", "p"].includes(block.type)) {
       const tag = fallbackTag(block.type);
-      if (tag) appendBlock(wrapElement(tag, cleanInlineHtml(block.text, allowedTags, linksForText(block.text, block.links || []))));
+      if (tag) {
+        const text = block.type === "p" ? restoreMissingLeadingQuote(block.text) : block.text;
+        const html = cleanInlineHtml(text, allowedTags, linksForText(text, block.links || []));
+        appendBlock(wrapElement(tag, block.type === "p" && block.italic && allowedTags.includes("em") ? `<em>${html}</em>` : html));
+      }
     }
   });
 
