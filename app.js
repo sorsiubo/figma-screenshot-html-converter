@@ -175,6 +175,7 @@ const cleanOcrText = (value) =>
     .replace(/\balist\b/gi, "a list")
     .replace(/\bsawvier\b/gi, "savvier")
     .replace(/\bcan difficult\b/gi, "can be difficult")
+    .replace(/\bAla[.\s~,-]*(?:--|[-–—~])?\s*\(BUSINESS WIRE\)\s*(?:--|[-–—~])*/gi, "Ala.--(BUSINESS WIRE)--")
     .replace(/\bsoon to be\b/gi, "soon-to-be"));
 
 const highlightHtml = (value) => {
@@ -764,6 +765,15 @@ const getLineItems = (ocrData) => {
         bbox: line.bbox,
         words: wordsForLine(line),
         visualLinkPhrases: line.visualLinkPhrases,
+        fontStyle: line.fontStyle,
+        font_style: line.font_style,
+        style: line.style,
+        font: line.font,
+        fontName: line.fontName,
+        font_name: line.font_name,
+        italic: line.italic,
+        isItalic: line.isItalic,
+        is_italic: line.is_italic,
       }))
       .filter((line) => line.text);
   }
@@ -772,6 +782,222 @@ const getLineItems = (ocrData) => {
     .split(/\n+/)
     .map((line) => ({ text: normalizeWhitespace(line.replace(/[|_]{2,}/g, " ")) }))
     .filter((line) => line.text);
+};
+
+const bboxIntersectionRatio = (first, second) => {
+  if (!first || !second) return 0;
+  const width = Math.max(0, Math.min(first.x1, second.x1) - Math.max(first.x0, second.x0));
+  const height = Math.max(0, Math.min(first.y1, second.y1) - Math.max(first.y0, second.y0));
+  const area = Math.max(1, (first.x1 - first.x0) * (first.y1 - first.y0));
+  return (width * height) / area;
+};
+
+const combineBboxes = (items) => {
+  const boxes = items.map(getOcrBbox).filter(Boolean);
+  if (!boxes.length) return null;
+  return {
+    x0: Math.min(...boxes.map((box) => box.x0)),
+    y0: Math.min(...boxes.map((box) => box.y0)),
+    x1: Math.max(...boxes.map((box) => box.x1)),
+    y1: Math.max(...boxes.map((box) => box.y1)),
+  };
+};
+
+const detectImageRegions = (canvas) => {
+  if (!canvas?.getContext || canvas.width < 240 || canvas.height < 160) return [];
+
+  let pixels;
+  try {
+    pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+  } catch {
+    return [];
+  }
+
+  const tileSize = Math.max(12, Math.round(Math.min(canvas.width, canvas.height) / 90));
+  const columns = Math.ceil(canvas.width / tileSize);
+  const rows = Math.ceil(canvas.height / tileSize);
+  const visualTiles = new Uint8Array(columns * rows);
+
+  for (let tileY = 0; tileY < rows; tileY += 1) {
+    for (let tileX = 0; tileX < columns; tileX += 1) {
+      const x0 = tileX * tileSize;
+      const y0 = tileY * tileSize;
+      const x1 = Math.min(canvas.width, x0 + tileSize);
+      const y1 = Math.min(canvas.height, y0 + tileSize);
+      let samples = 0;
+      let sum = 0;
+      let sumSquares = 0;
+      let nonWhite = 0;
+      let colorful = 0;
+
+      for (let y = y0; y < y1; y += 2) {
+        for (let x = x0; x < x1; x += 2) {
+          const offset = (y * canvas.width + x) * 4;
+          const red = pixels[offset];
+          const green = pixels[offset + 1];
+          const blue = pixels[offset + 2];
+          const luminance = (red + green + blue) / 3;
+          samples += 1;
+          sum += luminance;
+          sumSquares += luminance * luminance;
+          if (luminance < 235) nonWhite += 1;
+          if (Math.max(red, green, blue) - Math.min(red, green, blue) > 18 && luminance < 245) colorful += 1;
+        }
+      }
+
+      const mean = sum / Math.max(1, samples);
+      const deviation = Math.sqrt(Math.max(0, sumSquares / Math.max(1, samples) - mean * mean));
+      const nonWhiteShare = nonWhite / Math.max(1, samples);
+      const colorfulShare = colorful / Math.max(1, samples);
+      if (deviation > 23 && (colorfulShare > 0.06 || nonWhiteShare > 0.48)) {
+        visualTiles[tileY * columns + tileX] = 1;
+      }
+    }
+  }
+
+  const closedTiles = visualTiles.slice();
+  for (let tileY = 1; tileY < rows - 1; tileY += 1) {
+    for (let tileX = 1; tileX < columns - 1; tileX += 1) {
+      const index = tileY * columns + tileX;
+      if (visualTiles[index]) continue;
+      let neighbors = 0;
+      for (let deltaY = -1; deltaY <= 1; deltaY += 1) {
+        for (let deltaX = -1; deltaX <= 1; deltaX += 1) {
+          if (!deltaX && !deltaY) continue;
+          neighbors += visualTiles[(tileY + deltaY) * columns + tileX + deltaX];
+        }
+      }
+      if (neighbors >= 4) closedTiles[index] = 1;
+    }
+  }
+
+  const seen = new Uint8Array(closedTiles.length);
+  const regions = [];
+  const directions = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1, 0], [1, 0],
+    [-1, 1], [0, 1], [1, 1],
+  ];
+
+  for (let tileY = 0; tileY < rows; tileY += 1) {
+    for (let tileX = 0; tileX < columns; tileX += 1) {
+      const start = tileY * columns + tileX;
+      if (!closedTiles[start] || seen[start]) continue;
+      const queue = [[tileX, tileY]];
+      seen[start] = 1;
+      let minX = tileX;
+      let maxX = tileX;
+      let minY = tileY;
+      let maxY = tileY;
+
+      for (let cursor = 0; cursor < queue.length; cursor += 1) {
+        const [currentX, currentY] = queue[cursor];
+        minX = Math.min(minX, currentX);
+        maxX = Math.max(maxX, currentX);
+        minY = Math.min(minY, currentY);
+        maxY = Math.max(maxY, currentY);
+        directions.forEach(([deltaX, deltaY]) => {
+          const nextX = currentX + deltaX;
+          const nextY = currentY + deltaY;
+          if (nextX < 0 || nextY < 0 || nextX >= columns || nextY >= rows) return;
+          const nextIndex = nextY * columns + nextX;
+          if (!closedTiles[nextIndex] || seen[nextIndex]) return;
+          seen[nextIndex] = 1;
+          queue.push([nextX, nextY]);
+        });
+      }
+
+      const regionWidth = (maxX - minX + 1) * tileSize;
+      const regionHeight = (maxY - minY + 1) * tileSize;
+      const tileArea = (maxX - minX + 1) * (maxY - minY + 1);
+      const fillShare = queue.length / Math.max(1, tileArea);
+      if (
+        queue.length >= 12 &&
+        regionWidth >= canvas.width * 0.16 &&
+        regionHeight >= canvas.height * 0.07 &&
+        fillShare >= 0.2
+      ) {
+        regions.push({
+          x0: Math.max(0, (minX - 1) * tileSize),
+          y0: Math.max(0, (minY - 1) * tileSize),
+          x1: Math.min(canvas.width, (maxX + 2) * tileSize),
+          y1: Math.min(canvas.height, (maxY + 2) * tileSize),
+        });
+      }
+    }
+  }
+
+  return regions
+    .sort((first, second) => first.y0 - second.y0 || first.x0 - second.x0)
+    .slice(0, 8);
+};
+
+const joinOcrWords = (words) => normalizeWhitespace(words.map((word) => word.text || "").join(" "))
+  .replace(/\s+([,.;:!?])/g, "$1")
+  .replace(/([({[])\s+/g, "$1");
+
+const integrateDetectedImages = (lineItems, canvas) => {
+  const regions = detectImageRegions(canvas);
+  if (!regions.length) return lineItems;
+
+  const outsideLines = lineItems.flatMap((lineItem) => {
+    const words = Array.isArray(lineItem.words) ? lineItem.words.filter((word) => word?.text) : [];
+    if (words.length) {
+      const outsideWords = words.filter((word) => {
+        const wordBox = getOcrBbox(word);
+        return !regions.some((region) => bboxIntersectionRatio(wordBox, region) >= 0.5);
+      });
+      if (!outsideWords.length) return [];
+      if (outsideWords.length !== words.length) {
+        return [{
+          ...lineItem,
+          text: joinOcrWords(outsideWords),
+          words: outsideWords,
+          bbox: combineBboxes(outsideWords),
+        }];
+      }
+      return [lineItem];
+    }
+
+    const lineBox = getOcrBbox(lineItem);
+    const insideImage = regions.some((region) => bboxIntersectionRatio(lineBox, region) >= 0.55);
+    return insideImage ? [] : [lineItem];
+  });
+
+  const captionLines = new Set();
+  const imageItems = regions.map((region) => {
+    const nearbyLines = outsideLines
+      .filter((lineItem) => {
+        const box = getOcrBbox(lineItem);
+        if (!box) return false;
+        const verticallyAligned = box.y1 >= region.y0 && box.y0 <= region.y1;
+        const toTheRight = box.x0 >= region.x1 - Math.max(8, (region.y1 - region.y0) * 0.03);
+        return verticallyAligned && toTheRight && lineItem.text.length >= 12 && !isOcrGarbageLine(lineItem.text);
+      })
+      .sort((first, second) => getOcrBbox(first).y0 - getOcrBbox(second).y0);
+    nearbyLines.forEach((lineItem) => captionLines.add(lineItem));
+    const nearbyCaption = nearbyLines
+      .map((lineItem) => lineItem.text)
+      .join(" ");
+    return {
+      text: "Image",
+      alt: normalizeWhitespace(nearbyCaption).slice(0, 240) || "Image",
+      detectedImage: true,
+      bbox: region,
+      words: [],
+    };
+  });
+
+  const markedOutsideLines = outsideLines.map((lineItem) => (
+    captionLines.has(lineItem) ? { ...lineItem, imageCaption: true } : lineItem
+  ));
+
+  return [...markedOutsideLines, ...imageItems].sort((first, second) => {
+    const firstBox = getOcrBbox(first);
+    const secondBox = getOcrBbox(second);
+    if (!firstBox || !secondBox) return 0;
+    return firstBox.y0 - secondBox.y0 || firstBox.x0 - secondBox.x0;
+  });
 };
 
 const loadScript = (src) =>
@@ -1005,7 +1231,8 @@ const isSourceLabel = (line) => /^Sources?:?$/i.test(line.trim());
 const isSourceLine = (line) => /^Sources?:\s+\S+/i.test(line.trim());
 const isEmailLine = (line) => /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/i.test(line.trim());
 const isStandaloneUrlLine = (line) => /^(?:https?:\/\/|www\.)(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:\/[^\s<]*)?\.?$/i.test(line.trim());
-const isPressReleaseDateline = (line) => /^[A-Z][A-Z\s.-]+,\s+[A-Z][A-Za-z.]+\.?--\(?BUSINESS WIRE\)?--/i.test(line.trim());
+const isPressReleaseDateline = (line) =>
+  /^[A-Z][A-Z\s.-]+,\s+[A-Z][A-Za-z.]+[.\s~,-]*(?:--|[-–—~])?\s*\(?BUSINESS WIRE\)?\s*(?:--|[-–—~])?/i.test(line.trim());
 
 const isShortNumericNoise = (line) => /^[0oO]{1,4}$/.test(line.trim()) || /^\d{1,2}$/.test(line.trim());
 
@@ -1094,6 +1321,126 @@ const getNumberedInlineTip = (line) => {
   };
 };
 
+const isKnownItalicDeckLine = (line) =>
+  /\bSenior Vice President\b/i.test(line) ||
+  /\bPromoted to\b/i.test(line) ||
+  /\bto Retire\.?$/i.test(line);
+
+const isPlainPressReleaseDeckLine = (line) =>
+  /\bnow serving as\b/i.test(line);
+
+const hasItalicSignal = (lineItem) => {
+  const values = [
+    lineItem,
+    ...(Array.isArray(lineItem?.words) ? lineItem.words : []),
+  ];
+  return values.some((item) => {
+    if (!item) return false;
+    if (item.italic === true || item.isItalic === true || item.is_italic === true) return true;
+    return /italic|oblique/i.test([
+      item.fontStyle,
+      item.font_style,
+      item.style,
+      item.font,
+      item.fontName,
+      item.font_name,
+    ].filter(Boolean).join(" "));
+  });
+};
+
+const isVisuallyItalicLine = (lineItem, canvas) => {
+  const bbox = getOcrBbox(lineItem);
+  if (!bbox || !canvas?.getContext) return false;
+
+  const left = Math.max(0, Math.floor(bbox.x0) - 1);
+  const top = Math.max(0, Math.floor(bbox.y0) - 1);
+  const right = Math.min(canvas.width, Math.ceil(bbox.x1) + 1);
+  const bottom = Math.min(canvas.height, Math.ceil(bbox.y1) + 1);
+  const width = right - left;
+  const height = bottom - top;
+  if (width < 60 || height < 8) return false;
+
+  let pixels;
+  try {
+    pixels = canvas.getContext("2d").getImageData(left, top, width, height).data;
+  } catch {
+    return false;
+  }
+
+  const dark = new Uint8Array(width * height);
+  for (let index = 0; index < dark.length; index += 1) {
+    const offset = index * 4;
+    const luminance = (pixels[offset] + pixels[offset + 1] + pixels[offset + 2]) / 3;
+    dark[index] = pixels[offset + 3] > 0 && luminance < 190 ? 1 : 0;
+  }
+
+  const seen = new Uint8Array(dark.length);
+  const slopes = [];
+  const neighbors = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1, 0], [1, 0],
+    [-1, 1], [0, 1], [1, 1],
+  ];
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const start = y * width + x;
+      if (!dark[start] || seen[start]) continue;
+
+      const queue = [[x, y]];
+      const rows = new Map();
+      let minX = x;
+      let maxX = x;
+      let minY = y;
+      let maxY = y;
+      let area = 0;
+      seen[start] = 1;
+
+      for (let cursor = 0; cursor < queue.length; cursor += 1) {
+        const [currentX, currentY] = queue[cursor];
+        area += 1;
+        minX = Math.min(minX, currentX);
+        maxX = Math.max(maxX, currentX);
+        minY = Math.min(minY, currentY);
+        maxY = Math.max(maxY, currentY);
+        if (!rows.has(currentY)) rows.set(currentY, []);
+        rows.get(currentY).push(currentX);
+
+        neighbors.forEach(([deltaX, deltaY]) => {
+          const nextX = currentX + deltaX;
+          const nextY = currentY + deltaY;
+          if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) return;
+          const nextIndex = nextY * width + nextX;
+          if (!dark[nextIndex] || seen[nextIndex]) return;
+          seen[nextIndex] = 1;
+          queue.push([nextX, nextY]);
+        });
+      }
+
+      if (maxY - minY < 7 || maxX - minX < 1 || area < 10) continue;
+      const points = [...rows.entries()].map(([rowY, rowXs]) => ({
+        y: rowY,
+        x: rowXs.reduce((sum, value) => sum + value, 0) / rowXs.length,
+      }));
+      const meanX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+      const meanY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+      let numerator = 0;
+      let denominator = 0;
+      points.forEach((point) => {
+        numerator += (point.y - meanY) * (point.x - meanX);
+        denominator += (point.y - meanY) ** 2;
+      });
+      if (denominator > 0) slopes.push(numerator / denominator);
+    }
+  }
+
+  if (slopes.length < 8) return false;
+  slopes.sort((first, second) => first - second);
+  const medianSlope = slopes[Math.floor(slopes.length / 2)];
+  const leftLeaningShare = slopes.filter((slope) => slope < -0.08).length / slopes.length;
+  return medianSlope < -0.14 && leftLeaningShare >= 0.72;
+};
+
 const hasBulletMarker = (line) =>
   /^\s*(?:[-*+﹢＋•∙●◦○·▪▫■□‣⁃–—]|[«»]\s*\+?|[oO]\s{1,2})\s+/.test(line);
 
@@ -1169,12 +1516,15 @@ const isLikelyBlackHeading = (lineItem, nextItem, canvas) => {
 
 const getLineRole = (lineItem, nextItem, canvas) => {
   const line = lineItem.text.trim();
+  if (lineItem.detectedImage) return { type: "img", alt: lineItem.alt || "Image" };
+  if (lineItem.imageCaption) return { type: "p", text: line, links: getVisualLinkPhrases(lineItem, canvas), bold: true };
   const imageAlt = getImagePlaceholderText(line);
   if (imageAlt) return { type: "img", alt: imageAlt };
   if (isDocumentCodeLine(line)) return { type: "p", text: line, hard: true, links: [] };
   if (isSourceLine(line)) return { type: "p", text: line, hard: true, links: getVisualLinkPhrases(lineItem, canvas) };
   if (isEmailLine(line)) return { type: "p", text: line, hard: true, links: getVisualLinkPhrases(lineItem, canvas) };
   if (isStandaloneUrlLine(line)) return { type: "p", text: line.replace(/\.$/, ""), hard: true, links: getVisualLinkPhrases(lineItem, canvas) };
+  if (isPressReleaseDateline(line)) return { type: "p", text: line, links: getVisualLinkPhrases(lineItem, canvas), dateline: true };
   if (isSourceLabel(line)) return { type: "p", text: line.replace(/:$/, ":"), hard: true, links: [] };
   if (isBylineOrCredential(line)) return { type: "p", text: line, hard: true, links: getVisualLinkPhrases(lineItem, canvas) };
 
@@ -1183,6 +1533,10 @@ const getLineRole = (lineItem, nextItem, canvas) => {
 
   const bulletText = getBulletText(lineItem, canvas);
   if (bulletText && hasBulletMarker(line)) return { type: "li", text: bulletText, links: getVisualLinkPhrases(lineItem, canvas) };
+  const nextBulletText = nextItem ? getBulletText(nextItem, canvas) : "";
+  if (/:$/.test(line) && nextBulletText) {
+    return { type: "p", text: line, links: getVisualLinkPhrases(lineItem, canvas) };
+  }
 
   const knownH3 = getKnownNumberedSectionHeadingText(line);
   if (knownH3) return { type: "h3", text: knownH3, links: [] };
@@ -1222,6 +1576,7 @@ const shouldJoinParagraphLines = (previousItem, nextItem, previousRole, nextRole
   ) return false;
   if (isBylineOrCredential(previous) || isBylineOrCredential(next)) return false;
 
+  if (isPressReleaseDateline(previous) && /^\([^)]*TSE[:=]\d+/i.test(next)) return true;
   if (
     /^These are just a few important considerations for rebuilding your new personal financial plan after a divorce\./i.test(previous) &&
     /^Think of this process as a way to help you get a fresh start on your finances and your new life after divorce\.?$/i.test(next)
@@ -1267,9 +1622,12 @@ const shouldContinueNumberedTip = (previousItem, nextItem, nextRole) => {
   return gap >= -height * 0.35 && gap <= height * 2.1;
 };
 
-const normalizeLineItems = (ocrData) => {
+const normalizeLineItems = (ocrDataOrLineItems) => {
   const seenDocumentCodes = new Set();
-  return getLineItems(ocrData)
+  const sourceLineItems = Array.isArray(ocrDataOrLineItems)
+    ? ocrDataOrLineItems
+    : getLineItems(ocrDataOrLineItems);
+  return sourceLineItems
     .map((lineItem) => ({
       ...lineItem,
       text: cleanOcrText(repairDocumentCodeLine(lineItem.text)),
@@ -1286,8 +1644,9 @@ const normalizeLineItems = (ocrData) => {
     });
 };
 
-const buildBlocks = (lineItems, canvas) => {
+const classifyLineRoles = (lineItems, canvas) => {
   const roles = lineItems.map((lineItem, index) => getLineRole(lineItem, lineItems[index + 1], canvas));
+
   roles.forEach((role, index) => {
     const previousRole = roles[index - 1];
     if (
@@ -1301,24 +1660,74 @@ const buildBlocks = (lineItems, canvas) => {
       roles[index] = { type: "p", text: role.text, links: role.links || [] };
     }
   });
+
   roles.forEach((role, index) => {
     if (!isPressReleaseDateline(lineItems[index]?.text || "")) return;
 
     let cursor = index - 1;
     while (cursor >= 0) {
       const role = roles[cursor];
-      if (!role || role.hard || !["p", "h2", "h3", "h4"].includes(role.type)) break;
+      if (!role || !["p", "h2", "h3", "h4"].includes(role.type)) break;
+      const bylineDeck = role.hard && isBylineOrCredential(role.text);
+      if (role.hard && !bylineDeck) break;
       if (isPressReleaseDateline(lineItems[cursor]?.text || "")) break;
+      const wasHeading = ["h2", "h3", "h4"].includes(role.type);
+      const visuallyItalicDeck =
+        hasItalicSignal(lineItems[cursor]) ||
+        isVisuallyItalicLine(lineItems[cursor], canvas);
+      const shouldItalicize = visuallyItalicDeck || (!isPlainPressReleaseDeckLine(role.text) &&
+        (wasHeading || bylineDeck || isKnownItalicDeckLine(role.text) || !endsWithTerminalPunctuation(role.text)));
       if (cursor < index - 1) {
         const gapToNext = verticalGap(lineItems[cursor], lineItems[cursor + 1]);
         const height = lineHeight(lineItems[cursor]);
         const shortDeckLine = getTextShape(role.text).words <= 14 && role.text.length <= 120;
         if (gapToNext != null && gapToNext > height * 1.8 && !shortDeckLine) break;
       }
-      roles[cursor] = { type: "p", text: role.text, links: role.links || [], italic: true };
+      roles[cursor] = { type: "p", text: role.text, links: role.links || [], italic: shouldItalicize };
       cursor -= 1;
     }
   });
+
+  return roles;
+};
+
+const shouldContinueListItem = (pendingList, previousItem, nextItem, nextRole) => {
+  if (!pendingList?.items.length || !previousItem || !nextItem || nextRole?.type !== "p" || nextRole.hard) {
+    return false;
+  }
+  if (
+    isDocumentCodeLine(nextRole.text) ||
+    isSourceLabel(nextRole.text) ||
+    isSourceLine(nextRole.text) ||
+    isEmailLine(nextRole.text) ||
+    isStandaloneUrlLine(nextRole.text) ||
+    isPressReleaseDateline(nextRole.text) ||
+    isBylineOrCredential(nextRole.text)
+  ) {
+    return false;
+  }
+
+  const lastItem = pendingList.items[pendingList.items.length - 1];
+  const previousBox = getOcrBbox(previousItem);
+  const nextBox = getOcrBbox(nextItem);
+  const startBox = getOcrBbox(lastItem.startLineItem);
+  const height = lineHeight(previousItem);
+  const gap = verticalGap(previousItem, nextItem);
+  if (gap != null && (gap < -height * 0.4 || gap > height * 1.35)) return false;
+
+  const hangsUnderBullet =
+    Boolean(startBox && nextBox) &&
+    nextBox.x0 >= startBox.x0 + height * 0.35;
+  const sameTextColumn =
+    Boolean(previousBox && nextBox) &&
+    Math.abs(nextBox.x0 - previousBox.x0) <= height * 1.25;
+  const previousNeedsContinuation = !endsWithTerminalPunctuation(lastItem.text);
+
+  return previousNeedsContinuation || hangsUnderBullet || (lastItem.lineCount > 1 && sameTextColumn);
+};
+
+const buildBlocks = (lineItems, canvas) => {
+  const roles = classifyLineRoles(lineItems, canvas);
   const blocks = [];
   let pendingParagraph = null;
   let pendingList = null;
@@ -1353,18 +1762,39 @@ const buildBlocks = (lineItems, canvas) => {
     }
     if (pendingTip && role.type === "p") flushTip();
 
-    if (role.type !== "p") flushParagraph();
-    if (role.type !== "li") flushList();
-    if (role.type !== "numbered-tip" && role.type !== "p") flushTip();
-
     if (role.type === "li") {
+      flushParagraph();
       flushTip();
       if (!pendingList) pendingList = { type: "ul", items: [] };
-      pendingList.items.push(...splitEmbeddedListItems(role.text).map((text) => ({ text, links: role.links || [] })));
+      const itemTexts = splitEmbeddedListItems(role.text);
+      itemTexts.forEach((text) => {
+        pendingList.items.push({
+          text,
+          links: [...(role.links || [])],
+          lineCount: 1,
+          startLineItem: lineItem,
+          lastLineItem: lineItem,
+        });
+      });
       return;
     }
 
+    if (
+      pendingList &&
+      shouldContinueListItem(pendingList, pendingList.items[pendingList.items.length - 1].lastLineItem, lineItem, role)
+    ) {
+      const lastItem = pendingList.items[pendingList.items.length - 1];
+      lastItem.text = normalizeWhitespace(`${lastItem.text} ${role.text}`);
+      lastItem.links.push(...(role.links || []));
+      lastItem.lineCount += 1;
+      lastItem.lastLineItem = lineItem;
+      return;
+    }
+
+    flushList();
+
     if (role.type === "numbered-tip") {
+      flushParagraph();
       flushTip();
       pendingTip = { ...role, links: [...(role.links || [])] };
       lastTipItem = lineItem;
@@ -1384,15 +1814,25 @@ const buildBlocks = (lineItems, canvas) => {
         pendingParagraph.text = normalizeWhitespace(`${pendingParagraph.text} ${role.text}`);
         pendingParagraph.links.push(...(role.links || []));
         pendingParagraph.italic = pendingParagraph.italic || Boolean(role.italic);
+        pendingParagraph.bold = pendingParagraph.bold || Boolean(role.bold);
         pendingParagraph.lineCount += 1;
       } else {
         flushParagraph();
-        pendingParagraph = { type: "p", text: role.text, links: [...(role.links || [])], lineCount: 1, italic: Boolean(role.italic) };
+        pendingParagraph = {
+          type: "p",
+          text: role.text,
+          links: [...(role.links || [])],
+          lineCount: 1,
+          italic: Boolean(role.italic),
+          bold: Boolean(role.bold),
+        };
       }
       if (role.hard) flushParagraph();
       return;
     }
 
+    flushParagraph();
+    flushTip();
     blocks.push(role);
   });
 
@@ -1442,8 +1882,10 @@ const renderBlocks = (blocks, allowedTags, shouldAddBreaks) => {
       const tag = fallbackTag(block.type);
       if (tag) {
         const text = block.type === "p" ? restoreMissingLeadingQuote(block.text) : block.text;
-        const html = cleanInlineHtml(text, allowedTags, linksForText(text, block.links || []));
-        appendBlock(wrapElement(tag, block.type === "p" && block.italic && allowedTags.includes("em") ? `<em>${html}</em>` : html));
+        let html = cleanInlineHtml(text, allowedTags, linksForText(text, block.links || []));
+        if (block.type === "p" && block.bold) html = `<strong>${html}</strong>`;
+        if (block.type === "p" && block.italic && allowedTags.includes("em")) html = `<em>${html}</em>`;
+        appendBlock(wrapElement(tag, html));
       }
     }
   });
@@ -1453,7 +1895,7 @@ const renderBlocks = (blocks, allowedTags, shouldAddBreaks) => {
 };
 
 const textToHtml = (ocrData, allowedTags, shouldAddBreaks, canvas) => {
-  const lineItems = normalizeLineItems(ocrData);
+  const lineItems = normalizeLineItems(integrateDetectedImages(getLineItems(ocrData), canvas));
   if (!lineItems.length) return "<!-- No readable text was detected in the selected area. -->";
   return renderBlocks(buildBlocks(lineItems, canvas), allowedTags, shouldAddBreaks);
 };
